@@ -727,6 +727,9 @@ public sealed class App
         if (playing) _spectrum.Start();
         bool live = DemoSpectrum || playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
         var target = DemoSpectrum ? DemoBands() : _spectrum.Latest;
+        // The spectrogram wants the analyzer's frames as they are, not the falling bars.
+        if (live) Array.Copy(target, _rawBands, _rawBands.Length);
+        else Array.Clear(_rawBands);
         bool moving = false;
         for (int i = 0; i < _bars.Length; i++)
         {
@@ -1775,40 +1778,55 @@ public sealed class App
         FlushDots(c, x, y, w, h, (col, row) => Rgb.Lerp(Wheel(col / (double)Math.Max(1, w - 1)), Fx.White, _beat * 0.4));
     }
 
-    // Spectrogram history, newest first; one entry every ~60 ms.
+    // Spectrogram history, oldest first; one column every CascadeStep seconds.
     private readonly List<float[]> _cascade = new();
-    private double _cascadePushedAt;
+    private readonly float[] _rawBands = new float[SpectrumAnalyzer.BandCount];
+    private double _cascadeClock = double.NegativeInfinity;
+    private const double CascadeStep = 0.04;
 
     /// <summary>
-    /// Spectrogram that flows downward: each half-row is a past moment, colored by loudness
-    /// through the cover's colors. Quiet cells stay unpainted so the panel keeps its background.
+    /// Horizontal spectrogram, like Audacity or Spek: time runs right to left, bass at the
+    /// bottom, treble at the top, two frequency rows per cell (half blocks), colored by
+    /// loudness through the cover's colors. Built from the raw analyzer frames so hits stay
+    /// sharp; freezes while paused. Quiet cells stay unpainted (transparent).
     /// </summary>
     private void DrawCascade(Canvas c, int x, int y, int w, int h)
     {
-        if (Now - _cascadePushedAt > 0.06)
+        bool running = Playback.Playing || DemoSpectrum;
+        if (!running) _cascadeClock = Now;
+        else if (_cascadeClock < Now - 0.5) _cascadeClock = Now; // resume without a burst of catch-up columns
+        // Fixed time step regardless of frame rate, so the image scrolls evenly.
+        while (running && _cascadeClock + CascadeStep <= Now)
         {
-            _cascadePushedAt = Now;
-            var frame = _cascade.Count > h * 2 + 4 ? _cascade[^1] : new float[SpectrumAnalyzer.BandCount];
-            if (_cascade.Count > h * 2 + 4) _cascade.RemoveAt(_cascade.Count - 1);
-            Array.Copy(_bars, frame, frame.Length);
-            _cascade.Insert(0, frame);
+            _cascadeClock += CascadeStep;
+            var column = _cascade.Count >= w && _cascade.Count > 0 ? _cascade[0] : new float[SpectrumAnalyzer.BandCount];
+            if (_cascade.Count >= w && _cascade.Count > 0) _cascade.RemoveAt(0);
+            Array.Copy(_rawBands, column, column.Length);
+            _cascade.Add(column);
         }
-        Rgb? Heat(float v)
+        while (_cascade.Count > w) _cascade.RemoveAt(0);
+
+        Rgb? Heat(float raw)
         {
-            if (v < 0.07) return null;
-            return v < 0.45 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, Accent, 0.35), Accent, (v - 0.07) / 0.38)
-                : v < 0.75 ? Rgb.Lerp(Accent, _second, (v - 0.45) / 0.3)
-                : Rgb.Lerp(_second, Fx.White, (v - 0.75) / 0.25 * 0.7);
+            // Gamma lifts quiet detail without washing out the loud parts.
+            double v = Math.Pow(Math.Clamp(raw, 0, 1), 0.75);
+            if (v < 0.08) return null;
+            return v < 0.4 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, Accent, 0.3), Accent, (v - 0.08) / 0.32)
+                : v < 0.72 ? Rgb.Lerp(Accent, _second, (v - 0.4) / 0.32)
+                : Rgb.Lerp(_second, Fx.White, (v - 0.72) / 0.28 * 0.8);
         }
-        for (int r = 0; r < h; r++)
+
+        int bins = h * 2;
+        int first = w - _cascade.Count; // newest column sits at the right edge
+        for (int col = Math.Max(0, first); col < w; col++)
         {
-            int a = r * 2, b = r * 2 + 1;
-            if (a >= _cascade.Count) break;
-            for (int col = 0; col < w; col++)
+            var frame = _cascade[col - first];
+            for (int r = 0; r < h; r++)
             {
-                double pos = col / (double)Math.Max(1, w - 1) * (SpectrumAnalyzer.BandCount - 1);
-                var top = Heat(Sample(_cascade[a], pos));
-                var bottom = b < _cascade.Count ? Heat(Sample(_cascade[b], pos)) : null;
+                // Screen row r covers bins (top, bottom); bin 0 = bass at the panel's bottom.
+                int topBin = bins - 1 - r * 2, bottomBin = topBin - 1;
+                var top = Heat(Sample(frame, topBin / (double)(bins - 1) * (SpectrumAnalyzer.BandCount - 1)));
+                var bottom = Heat(Sample(frame, bottomBin / (double)(bins - 1) * (SpectrumAnalyzer.BandCount - 1)));
                 if (top is { } t && bottom is { } u) c.Set(x + col, y + r, '▀', t, u);
                 else if (top is { } t2) c.Set(x + col, y + r, '▀', t2);
                 else if (bottom is { } u2) c.Set(x + col, y + r, '▄', u2);

@@ -9,7 +9,7 @@ using Nation.Tui;
 // With no paths, plays the user's Music folder.
 var paths = new List<string>();
 string? snapshotPath = null, snapshotKeys = null;
-bool shuffle = false, offline = false, api = true, smtc = true, external = true, externalSnapshot = false, skin = false;
+bool shuffle = false, offline = false, api = true, smtc = true, external = true, externalSnapshot = false, skin = false, demoSpectrum = false;
 int apiPort = TauonCompatServer.DefaultPort;
 int? volume = null;
 for (int i = 0; i < args.Length; i++)
@@ -24,6 +24,7 @@ for (int i = 0; i < args.Length; i++)
     else if (args[i] == "--external") externalSnapshot = true;
     else if (args[i] == "--sessions") { }
     else if (args[i] == "--skin") skin = true;
+    else if (args[i] == "--demo-spectrum") demoSpectrum = true;
     else if (args[i] == "--volume" && i + 1 < args.Length && int.TryParse(args[i + 1], out var vol)) { volume = Math.Clamp(vol, 0, 100); i++; }
     else if (args[i] == "--api-port" && i + 1 < args.Length && int.TryParse(args[i + 1], out var port)) { apiPort = port; i++; }
     else paths.Add(args[i]);
@@ -60,7 +61,7 @@ using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null
 var sources = SourceSettings.Load();
 using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, Sources = sources, Ui = UiSettings.Load(), PersistSession = snapshotPath is null };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;

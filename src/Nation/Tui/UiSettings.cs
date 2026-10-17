@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Nation.Tui;
 
 /// <summary>Layout preferences that survive restarts; saved to %LOCALAPPDATA%\Nation\ui.json.</summary>
-public sealed record UiSettings(bool ShowQueue = true)
+public sealed record UiSettings(bool ShowQueue = true, int Visual = 0)
 {
     private static readonly string FilePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nation", "ui.json");

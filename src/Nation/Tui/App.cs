@@ -34,7 +34,16 @@ public sealed class App
     private int _sourceRow;
 
     /// <summary>Layout preferences (library sidebar on/off); saved on every change.</summary>
-    public UiSettings Ui { get; set; } = new();
+    public UiSettings Ui
+    {
+        get => _ui;
+        set
+        {
+            _ui = value;
+            _visual = (Visual)Math.Clamp(value.Visual, 0, Enum.GetValues<Visual>().Length - 1);
+        }
+    }
+    private UiSettings _ui = new();
     /// <summary>The library sidebar: hidden at will, and always while following another app (it has no local queue).</summary>
     private bool QueueVisible => !_externalMode && Ui.ShowQueue;
 
@@ -43,8 +52,7 @@ public sealed class App
     private int _menuRow;
     private bool _quit;
 
-    // More sound-reactive bits: sparks thrown off the spectrum on beats, a tempo readout,
-    // and a glow behind the player that swells with the bass.
+    // More sound-reactive bits: sparks thrown off the spectrum on beats and a tempo readout.
     private readonly List<(double X, double Y, double Born)> _sparks = new();
     private readonly List<double> _beatGaps = new();
     private double _bpm;
@@ -90,7 +98,22 @@ public sealed class App
     private readonly List<double> _ripples = new();
 
     // Visualizer style (`v`) and the moment it changed, for the title notice.
-    private enum Visual { Barras, Espejo, Onda, Lluvia }
+    private enum Visual { Barras, Espejo, Onda, Lluvia, Circulo, Osciloscopio, Cascada, Reflejo }
+
+    private string VisualName => _visual switch
+    {
+        Visual.Circulo => "círculo",
+        _ => _visual.ToString().ToLowerInvariant(),
+    };
+
+    /// <summary>Next visualizer (`v`); remembered in ui.json.</summary>
+    private void CycleVisual()
+    {
+        _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length);
+        _visualChangedAt = Now;
+        Ui = Ui with { Visual = (int)_visual };
+        Ui.Save();
+    }
     private Visual _visual = Visual.Barras;
     private double _visualChangedAt = double.NegativeInfinity;
     private double[] _rainY = Array.Empty<double>();
@@ -211,10 +234,7 @@ public sealed class App
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
             case ConsoleKey.E: _eqOpen = true; _sourcesOpen = false; break;
-            case ConsoleKey.V:
-                _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length);
-                _visualChangedAt = Now;
-                break;
+            case ConsoleKey.V: CycleVisual(); break;
             case ConsoleKey.R: Playback.ToggleRepeat(); break;
             case ConsoleKey.RightArrow: Playback.SeekRelative(shift ? 30 : 5); break;
             case ConsoleKey.LeftArrow: Playback.SeekRelative(shift ? -30 : -5); break;
@@ -689,13 +709,24 @@ public sealed class App
     private double BeatStep => Math.Round(_beat * 4) / 4;
     private double BassStep => Math.Round(_bass * 4) / 4;
 
+    /// <summary>--demo-spectrum (snapshots): synthetic moving bands so visualizers can be checked without audio.</summary>
+    public bool DemoSpectrum { get; init; }
+
+    private float[] DemoBands()
+    {
+        var bands = new float[SpectrumAnalyzer.BandCount];
+        for (int i = 0; i < bands.Length; i++)
+            bands[i] = (float)Math.Clamp(0.7 * Math.Exp(-i / 9.0) + 0.3 * (0.5 + 0.5 * Math.Sin(Now * 3 + i * 0.7)), 0, 1);
+        return bands;
+    }
+
     private void UpdateSpectrum(double dt)
     {
         // Loopback hears every app; only capture while Nation itself is playing.
         bool playing = Playback.Playing;
         if (playing) _spectrum.Start();
-        bool live = playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
-        var target = _spectrum.Latest;
+        bool live = DemoSpectrum || playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
+        var target = DemoSpectrum ? DemoBands() : _spectrum.Latest;
         bool moving = false;
         for (int i = 0; i < _bars.Length; i++)
         {
@@ -869,18 +900,12 @@ public sealed class App
         if (notice) _animSlow = true;
         bool sourceNotice = Now - _sourceChangedAt < 2.5 && _sourceNotice is not null;
         if (sourceNotice) _animSlow = true;
-        string title = notice ? $"Reproduciendo · visual: {_visual.ToString().ToLowerInvariant()}"
+        string title = notice ? $"Reproduciendo · visual: {VisualName}"
             : sourceNotice ? $"Reproduciendo · {_sourceNotice}"
             : _externalMode ? $"Reproduciendo · {External?.AppName}" : "Reproduciendo";
         notice |= sourceNotice;
         var border = _fx ? Rgb.Lerp(BorderIn(_second), _second, BeatStep * 0.8) : PanelBorder;
         Panel(c, x, y, w, h, title, border, notice ? Accent : Muted);
-        // The panel's background swells toward the cover's backdrop with the bass (stepped to limit repaints).
-        if (_fx && Playback.Playing && BassStep >= 0.25)
-        {
-            var glow = Rgb.Lerp(Rgb.Hex(0x0C0C0C), _palette.Backdrop, BassStep * 0.7);
-            for (int row = y + 1; row < y + h - 1; row++) c.FillRow(x + 1, row, w - 2, glow);
-        }
         int ix = x + 3, iw = w - 6;
         var t = Playback.Current;
         if (t is null)
@@ -1088,7 +1113,7 @@ public sealed class App
         if (!_externalMode) items.Add(new("Vista", "b", "lista de canciones (barra lateral)", ToggleSidebar, Ui.ShowQueue ? "visible" : "oculta"));
         items.Add(new("Vista", "l", "letra", () => _showLyrics = !_showLyrics, YesNo(_showLyrics)));
         if (!_externalMode) items.Add(new("Vista", "e", "ecualizador", () => { _eqOpen = true; _sourcesOpen = false; }));
-        items.Add(new("Vista", "v", "visualizador", () => { _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length); _visualChangedAt = Now; }, _visual.ToString().ToLowerInvariant()));
+        items.Add(new("Vista", "v", "visualizador", CycleVisual, VisualName));
         items.Add(new("Vista", "f", "efectos", () => _fx = !_fx, YesNo(_fx)));
 
         items.Add(new("Letra", ",", "desfase −0.25 s", () => NudgeLyrics(-0.25)));
@@ -1580,6 +1605,10 @@ public sealed class App
             case Visual.Espejo: DrawMirror(c, x, y, w, h); break;
             case Visual.Onda: DrawWave(c, x, y, w, h); break;
             case Visual.Lluvia: DrawRain(c, x, y, w, h); break;
+            case Visual.Circulo: DrawCircle(c, x, y, w, h); break;
+            case Visual.Osciloscopio: DrawScope(c, x, y, w, h); break;
+            case Visual.Cascada: DrawCascade(c, x, y, w, h); break;
+            case Visual.Reflejo: DrawReflection(c, x, y, w, h); break;
             default: DrawSpectrum(c, x, y, w, h); break;
         }
     }
@@ -1640,6 +1669,179 @@ public sealed class App
             }
         }
         if (_fx) DrawSparks(c, x, y, w, h, sx => x + (int)Math.Round(sx * (w - 1)));
+    }
+
+    // ── braille canvas shared by the dot-drawn visualizers ──
+
+    private bool[] _dots = Array.Empty<bool>();
+    private int _dotsW, _dotsH;
+
+    private void BeginDots(int w, int h)
+    {
+        _dotsW = w * 2;
+        _dotsH = h * 4;
+        int n = _dotsW * _dotsH;
+        if (_dots.Length < n) _dots = new bool[n];
+        Array.Clear(_dots, 0, n);
+    }
+
+    private void Dot(int dx, int dy)
+    {
+        if (dx >= 0 && dy >= 0 && dx < _dotsW && dy < _dotsH) _dots[dy * _dotsW + dx] = true;
+    }
+
+    private void DotLine(double x0, double y0, double x1, double y1)
+    {
+        int steps = Math.Max(1, (int)Math.Ceiling(Math.Max(Math.Abs(x1 - x0), Math.Abs(y1 - y0))));
+        for (int i = 0; i <= steps; i++)
+        {
+            double t = i / (double)steps;
+            Dot((int)Math.Round(x0 + (x1 - x0) * t), (int)Math.Round(y0 + (y1 - y0) * t));
+        }
+    }
+
+    /// <summary>Turns the dot grid into braille cells; empty cells are left untouched (transparent).</summary>
+    private void FlushDots(Canvas c, int x, int y, int w, int h, Func<int, int, Rgb> color)
+    {
+        for (int r = 0; r < h; r++)
+            for (int cx = 0; cx < w; cx++)
+            {
+                int bits = 0;
+                for (int dy = 0; dy < 4; dy++)
+                    for (int sub = 0; sub < 2; sub++)
+                        if (_dots[(r * 4 + dy) * _dotsW + cx * 2 + sub]) bits |= BrailleBits[dy, sub];
+                if (bits != 0) c.Set(x + cx, y + r, (char)(0x2800 + bits), color(cx, r));
+            }
+    }
+
+    /// <summary>
+    /// The spectrum wrapped into a ring that breathes with the beat: bass at the top,
+    /// mirrored down both sides to the treble at the bottom, over a dotted inner circle.
+    /// </summary>
+    private void DrawCircle(Canvas c, int x, int y, int w, int h)
+    {
+        BeginDots(w, h);
+        double cx = _dotsW / 2.0, cy = _dotsH / 2.0;
+        // Braille dots are close to square. The ring is round when there's room, and
+        // stretches into an oval (up to 4:1) on the short, wide panel instead of shrinking.
+        double ry = _dotsH / 2.0 - 1, rx = Math.Min(_dotsW / 2.0 - 1, ry * 4);
+        if (ry < 3) { DrawSpectrum(c, x, y, w, h); return; }
+        double maxR = 1, r0 = 0.4 + _beat * 0.08;
+        int samples = (int)(rx * 12);
+        double px = 0, py = 0;
+        for (int i = 0; i <= samples; i++)
+        {
+            double a = i / (double)samples * 2 * Math.PI;
+            double f = 1 - Math.Abs(a / Math.PI - 1);
+            double r = r0 + Sample(_bars, f * (SpectrumAnalyzer.BandCount - 1)) * (maxR - r0);
+            double dx = cx + r * rx * Math.Sin(a), dy = cy - r * ry * Math.Cos(a);
+            if (i > 0) DotLine(px, py, dx, dy);
+            px = dx; py = dy;
+            if (i % 4 == 0) Dot((int)Math.Round(cx + r0 * 0.85 * rx * Math.Sin(a)), (int)Math.Round(cy - r0 * 0.85 * ry * Math.Cos(a)));
+        }
+        FlushDots(c, x, y, w, h, (col, row) =>
+        {
+            double ang = Math.Atan2((col * 2 + 1 - cx) / rx, (cy - (row * 4 + 2)) / ry);
+            double around = 1 - Math.Abs(ang / Math.PI); // 1 at the top, 0 at the bottom: same axis as the bands
+            return Rgb.Lerp(Wheel(1 - around), Fx.White, _beat * 0.35);
+        });
+    }
+
+    private double _scopePhase;
+
+    /// <summary>
+    /// Oscilloscope-style trace. The analyzer has no raw samples, so the wave is
+    /// rebuilt from eight band groups as sines whose loudness sets their amplitude.
+    /// </summary>
+    private void DrawScope(Canvas c, int x, int y, int w, int h)
+    {
+        BeginDots(w, h);
+        double mid = (_dotsH - 1) / 2.0, amp = _dotsH / 2.0 - 1;
+        if (Playback.Playing) _scopePhase += _dt;
+        Span<double> level = stackalloc double[8];
+        for (int k = 0; k < 8; k++) level[k] = Sample(_bars, k * (SpectrumAnalyzer.BandCount - 1) / 7.0);
+        double prev = mid;
+        for (int dx = 0; dx < _dotsW; dx++)
+        {
+            double u = dx / (double)Math.Max(1, _dotsW - 1), v = 0;
+            for (int k = 0; k < 8; k++)
+                v += level[k] * Math.Sin(2 * Math.PI * (1 + k * 1.7) * u * 2 + _scopePhase * (2.5 + k * 3.1) + k);
+            // Taper toward the edges so the trace looks anchored, like a scope screen.
+            v = Math.Clamp(v / 2.4, -1, 1) * Math.Sin(Math.PI * u);
+            double py = mid - v * amp;
+            if (dx > 0) DotLine(dx - 1, prev, dx, py); else Dot(0, (int)Math.Round(py));
+            prev = py;
+        }
+        FlushDots(c, x, y, w, h, (col, row) => Rgb.Lerp(Wheel(col / (double)Math.Max(1, w - 1)), Fx.White, _beat * 0.4));
+    }
+
+    // Spectrogram history, newest first; one entry every ~60 ms.
+    private readonly List<float[]> _cascade = new();
+    private double _cascadePushedAt;
+
+    /// <summary>
+    /// Spectrogram that flows downward: each half-row is a past moment, colored by loudness
+    /// through the cover's colors. Quiet cells stay unpainted so the panel keeps its background.
+    /// </summary>
+    private void DrawCascade(Canvas c, int x, int y, int w, int h)
+    {
+        if (Now - _cascadePushedAt > 0.06)
+        {
+            _cascadePushedAt = Now;
+            var frame = _cascade.Count > h * 2 + 4 ? _cascade[^1] : new float[SpectrumAnalyzer.BandCount];
+            if (_cascade.Count > h * 2 + 4) _cascade.RemoveAt(_cascade.Count - 1);
+            Array.Copy(_bars, frame, frame.Length);
+            _cascade.Insert(0, frame);
+        }
+        Rgb? Heat(float v)
+        {
+            if (v < 0.07) return null;
+            return v < 0.45 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, Accent, 0.35), Accent, (v - 0.07) / 0.38)
+                : v < 0.75 ? Rgb.Lerp(Accent, _second, (v - 0.45) / 0.3)
+                : Rgb.Lerp(_second, Fx.White, (v - 0.75) / 0.25 * 0.7);
+        }
+        for (int r = 0; r < h; r++)
+        {
+            int a = r * 2, b = r * 2 + 1;
+            if (a >= _cascade.Count) break;
+            for (int col = 0; col < w; col++)
+            {
+                double pos = col / (double)Math.Max(1, w - 1) * (SpectrumAnalyzer.BandCount - 1);
+                var top = Heat(Sample(_cascade[a], pos));
+                var bottom = b < _cascade.Count ? Heat(Sample(_cascade[b], pos)) : null;
+                if (top is { } t && bottom is { } u) c.Set(x + col, y + r, '▀', t, u);
+                else if (top is { } t2) c.Set(x + col, y + r, '▀', t2);
+                else if (bottom is { } u2) c.Set(x + col, y + r, '▄', u2);
+            }
+        }
+    }
+
+    /// <summary>Bars standing on water: the lower third mirrors them, dimmer, with a rippling shimmer.</summary>
+    private void DrawReflection(Canvas c, int x, int y, int w, int h)
+    {
+        int barH = Math.Max(1, (int)Math.Round(h * 0.65)), refH = h - barH;
+        DrawSpectrum(c, x, y, w, barH);
+        if (refH <= 0) return;
+        int count = Math.Max(1, (w + 1) / 2);
+        int offsetX = x + (w - (count * 2 - 1)) / 2;
+        var low = Rgb.Lerp(_palette.Backdrop, Accent, 0.45);
+        int tick = (int)(Now * 7);
+        for (int b = 0; b < count; b++)
+        {
+            double pos = count == 1 ? 0 : b * (SpectrumAnalyzer.BandCount - 1) / (double)(count - 1);
+            // The reflection is half as tall as the bar, measured in eighths of a cell.
+            int eighths = (int)Math.Round(Sample(_bars, pos) * barH * 8 * 0.5);
+            for (int r = 0; r < refH; r++)
+            {
+                int fill = Math.Clamp(eighths - r * 8, 0, 8);
+                if (fill == 0) break;
+                if (Fx.Noise(tick + b * 3, r) < 0.16) continue; // ripples break the surface
+                char glyph = fill >= 7 ? '█' : fill >= 4 ? '▀' : '▔';
+                double depth = (r + 1) / (double)(refH + 1);
+                var color = Rgb.Lerp(SpectrumColor(low, 1 - depth * 0.5, b / (double)Math.Max(1, count - 1)), _palette.Backdrop, 0.5 + depth * 0.35);
+                c.Set(offsetX + b * 2, y + barH + r, glyph, color);
+            }
+        }
     }
 
     /// <summary>Katakana rain: one stream per column, falling faster and with longer tails where its band is loud.</summary>

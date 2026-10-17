@@ -109,8 +109,11 @@ using (var terminal = new Terminal())
             command();
         while (media is not null && media.Commands.TryDequeue(out var command))
             command();
-        while (running && Console.KeyAvailable)
-            running = app.HandleKey(Console.ReadKey(intercept: true));
+        foreach (var input in terminal.ReadInput())
+        {
+            running = input.ShiftTap ? app.ToggleMenu() : app.HandleKey(input.Key);
+            if (!running) break;
+        }
         if (!running) break;
 
         var canvas = terminal.NewFrame();

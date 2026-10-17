@@ -43,10 +43,11 @@ public sealed class App
     private int _menuRow;
     private bool _quit;
 
-    // Bass-reactive borders: they thicken with the bass and the panels jolt on hard hits.
-    private double _lastShakeAt = double.NegativeInfinity;
-    private int _shakeDir = 1;
-    private const double ShakeTime = 0.07;
+    // More sound-reactive bits: sparks thrown off the spectrum on beats, a tempo readout,
+    // and a glow behind the player that swells with the bass.
+    private readonly List<(double X, double Y, double Born)> _sparks = new();
+    private readonly List<double> _beatGaps = new();
+    private double _bpm;
 
     // Skin mode (`o`): the player panel, lyrics and transport keys follow another app.
     // The queue, equalizer and saved session always stay on Nation's own library.
@@ -505,12 +506,6 @@ public sealed class App
         }
         else
             DrawLower(c, rx, bodyTop, rw, bodyHeight, dt);
-        // Hard bass hits jolt the panels one column, alternating sides.
-        if (_fx && now - _lastShakeAt < ShakeTime)
-        {
-            _animFast = true;
-            for (int row = bodyTop; row < bodyTop + bodyHeight; row++) c.ShiftRow(0, row, c.Width, _shakeDir);
-        }
         DrawFooter(c);
         if (_menuOpen) DrawMenu(c);
         if (_fx && now < BootTime) DrawBoot(c, now / BootTime);
@@ -615,14 +610,12 @@ public sealed class App
             if (flux > _fluxAvg * 1.6 + 0.08 && now - _lastBeatAt > 0.22)
             {
                 double strength = Math.Clamp((flux - _fluxAvg) / 0.6, 0.35, 1);
+                double gap = now - _lastBeatAt;
                 _lastBeatAt = now;
                 _beat = Math.Max(_beat, strength);
                 if (_ripples.Count < 4) _ripples.Add(now);
-                if (_fx && strength > 0.7 && now - _lastShakeAt > 0.45)
-                {
-                    _lastShakeAt = now;
-                    _shakeDir = -_shakeDir;
-                }
+                TrackTempo(gap);
+                if (_fx) SpawnSparks(now, strength);
                 // Hard hits glitch the metadata, with a cooldown so it never turns into strobe.
                 if (_fx && strength > 0.65 && now - _lastBeatGlitch > 3.5)
                 {
@@ -642,6 +635,54 @@ public sealed class App
         _level = target > _level ? target : Math.Max(target, _level - dt * 0.8);
         _levelPeak = _level >= _levelPeak ? _level : Math.Max(0, _levelPeak - dt * 0.25);
         if (_levelPeak > 0) _animFast = true;
+    }
+
+    /// <summary>
+    /// Tempo from the median gap between recent beats, folded into 70–180 BPM
+    /// (the detector often catches only every other kick, or the hi-hats too).
+    /// </summary>
+    private void TrackTempo(double gap)
+    {
+        if (gap < 0.25 || gap > 1.6) { if (gap > 3) _beatGaps.Clear(); return; }
+        _beatGaps.Add(gap);
+        if (_beatGaps.Count > 12) _beatGaps.RemoveAt(0);
+        if (_beatGaps.Count < 5) return;
+        var sorted = _beatGaps.OrderBy(g => g).ToList();
+        double bpm = 60 / sorted[sorted.Count / 2];
+        while (bpm < 70) bpm *= 2;
+        while (bpm > 180) bpm /= 2;
+        _bpm = _bpm == 0 ? bpm : _bpm + (bpm - _bpm) * 0.3;
+    }
+
+    /// <summary>A beat throws a few sparks off the loudest bars; they rise and fade.</summary>
+    private void SpawnSparks(double now, double strength)
+    {
+        int count = strength > 0.7 ? 3 : 2;
+        for (int k = 0; k < count && _sparks.Count < 30; k++)
+        {
+            // Pick among the louder bands, biased toward the bass that triggered the beat.
+            int band = (int)(Math.Pow(Random.Shared.NextDouble(), 1.6) * SpectrumAnalyzer.BandCount);
+            float level = _bars[Math.Clamp(band, 0, _bars.Length - 1)];
+            if (level < 0.2) continue;
+            _sparks.Add((band / (double)(SpectrumAnalyzer.BandCount - 1), level, now));
+        }
+    }
+
+    private const double SparkLife = 0.8;
+
+    /// <summary>Sparks above the visualizer: x in [0,1] across it, rising from the bar top they left.</summary>
+    private void DrawSparks(Canvas c, int x, int y, int w, int h, Func<double, int> column)
+    {
+        _sparks.RemoveAll(sp => Now - sp.Born > SparkLife);
+        foreach (var (sx, sy, born) in _sparks)
+        {
+            double age = Now - born, t = age / SparkLife;
+            double height = sy + age * 0.9 + 0.05;
+            int row = y + h - 1 - (int)(height * h);
+            if (row < y) continue;
+            char glyph = t < 0.3 ? '•' : t < 0.6 ? '∙' : '·';
+            c.Set(column(sx), row, glyph, Rgb.Lerp(Fx.White, Wheel(sx), t));
+        }
     }
 
     /// <summary>Beat envelope stepped into a few levels so pulsing borders don't repaint every row every frame.</summary>
@@ -712,6 +753,15 @@ public sealed class App
         string count = _externalMode ? "" : $"{_player.Queue.Count} pistas";
         int right = c.Width - count.Length - 1;
         c.Text(right, 0, count, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted);
+        // Tempo: the note flashes on every detected beat; hidden when the beat is lost.
+        if (_fx && Playback.Playing && _bpm > 0 && Now - _lastBeatAt < 3)
+        {
+            string bpm = $"{_bpm:0} bpm";
+            int bx = right - TextWidth.Of(bpm) - 2 - (count.Length > 0 ? 3 : 0);
+            c.Set(bx - 2, 0, _beat > 0.4 ? '♪' : '♩', Rgb.Lerp(_second, Fx.White, _beat));
+            c.Text(bx, 0, bpm, Rgb.Lerp(Muted, _second, 0.5));
+            right = bx - 2;
+        }
 
         // Shade polls every 500 ms while connected, so a quiet API means it's gone.
         if (Remote is { } api)
@@ -825,6 +875,12 @@ public sealed class App
         notice |= sourceNotice;
         var border = _fx ? Rgb.Lerp(BorderIn(_second), _second, BeatStep * 0.8) : PanelBorder;
         Panel(c, x, y, w, h, title, border, notice ? Accent : Muted);
+        // The panel's background swells toward the cover's backdrop with the bass (stepped to limit repaints).
+        if (_fx && Playback.Playing && BassStep >= 0.25)
+        {
+            var glow = Rgb.Lerp(Rgb.Hex(0x0C0C0C), _palette.Backdrop, BassStep * 0.7);
+            for (int row = y + 1; row < y + h - 1; row++) c.FillRow(x + 1, row, w - 2, glow);
+        }
         int ix = x + 3, iw = w - 6;
         var t = Playback.Current;
         if (t is null)
@@ -841,7 +897,9 @@ public sealed class App
         var from = _palette.Backdrop;
 
         DrawMarquee(c, ix, y + 2, iw, t.Title, Rgb.Lerp(from, Theme.Text, fade), bold: true, age, row: 0);
-        DrawMarquee(c, ix, y + 3, iw, t.Artist, Rgb.Lerp(from, Accent, fade), bold: false, age, row: 1);
+        var artistColor = Rgb.Lerp(from, Accent, fade);
+        if (_fx && Playback.Playing) artistColor = Rgb.Lerp(artistColor, Fx.White, BeatStep * 0.4);
+        DrawMarquee(c, ix, y + 3, iw, t.Artist, artistColor, bold: false, age, row: 1);
         string album = t.Year > 0 ? $"{t.Album} · {t.Year}" : t.Album;
         if (!DrawDecoded(c, ix, y + 4, iw, album, Muted, false, age, row: 2))
             c.Text(ix, y + 4, album, Rgb.Lerp(from, Muted, fade), maxWidth: iw);
@@ -977,6 +1035,14 @@ public sealed class App
 
     private sealed record MenuItem(string Section, string Key, string Label, Action Run, string? State = null);
 
+    /// <summary>Shift tapped on its own: open or close the command menu. Returns true (keep running).</summary>
+    public bool ToggleMenu()
+    {
+        if (_menuOpen) _menuOpen = false;
+        else OpenMenu();
+        return true;
+    }
+
     private void OpenMenu()
     {
         _menuOpen = true;
@@ -1102,7 +1168,7 @@ public sealed class App
             c.Text(x + 14, ry, item.Label, selected ? Theme.Text : Rgb.Lerp(Theme.Text, Muted, 0.35), rowBg, maxWidth: w - 16 - (stateW > 0 ? stateW + 2 : 0));
             if (item.State is { } state) c.Text(x + w - 2 - stateW, ry, state, _second, rowBg);
         }
-        string help = "j/k mover · enter ejecutar · esc cerrar · o pulsa su tecla";
+        string help = "j/k mover · enter ejecutar · shift/esc cerrar · o pulsa su tecla";
         c.Text(x + 2, y + h - 2, help, Muted, bg, maxWidth: w - 4);
     }
 
@@ -1573,6 +1639,7 @@ public sealed class App
                 c.Set(x + cx, y + r, (char)(0x2800 + bits), SpectrumColor(low, t, cx / (double)Math.Max(1, w - 1)));
             }
         }
+        if (_fx) DrawSparks(c, x, y, w, h, sx => x + (int)Math.Round(sx * (w - 1)));
     }
 
     /// <summary>Katakana rain: one stream per column, falling faster and with longer tails where its band is loud.</summary>
@@ -1627,12 +1694,14 @@ public sealed class App
             {
                 int cy = y + h - 1 - r;
                 int fill = Math.Clamp(eighths - r * 8, 0, 8);
+                if (fill == 0 && r != peakRow) continue;
                 if (fill > 0)
                     c.Set(cx, cy, Eighths[fill], SpectrumColor(low, h == 1 ? 1 : r / (double)(h - 1), b / (double)Math.Max(1, count - 1)));
                 else if (r == peakRow && peakRow > 0)
                     c.Set(cx, cy, '▁', peakColor);
             }
         }
+        if (_fx) DrawSparks(c, x, y, w, h, sx => offsetX + (int)Math.Round(sx * (count - 1)) * 2);
     }
 
     /// <summary>Bar color: backdrop to accent bottom-to-top; with fx, a gradient through the cover's colors across the width.</summary>
@@ -1685,7 +1754,7 @@ public sealed class App
     {
         int x = 1, y = c.Height - 1;
         // Everything lives in the command menu; the footer only says how to open it.
-        x += c.Text(x, y, "?", Accent, bold: true) + 1;
+        x += c.Text(x, y, "shift", Accent, bold: true) + 1;
         x += c.Text(x, y, "comandos", Muted) + 3;
         string? context = _menuOpen ? null : _eqOpen ? "esc cierra el ecualizador" : _sourcesOpen ? "esc cierra fuentes" : null;
         if (context is not null) c.Text(x, y, context, _fx ? Rgb.Lerp(Muted, _third, 0.4) : Muted);

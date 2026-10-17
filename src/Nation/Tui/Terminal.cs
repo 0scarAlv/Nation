@@ -25,6 +25,7 @@ public sealed class Terminal : IDisposable
     {
         Console.OutputEncoding = Encoding.UTF8;
         Console.TreatControlCAsInput = true;
+        EnableVirtualTerminal();
         InputHandle = new ConsoleInputWaitHandle();
         Write("\x1b[?1049h\x1b[?25l\x1b[2J");
     }
@@ -80,6 +81,110 @@ public sealed class Terminal : IDisposable
     }
 
     public void Dispose() => Write("\x1b[0m\x1b[?25h\x1b[?1049l");
+
+    /// <summary>A key press, or a tap of Shift on its own (pressed and released with no other key).</summary>
+    public readonly record struct Input(ConsoleKeyInfo Key, bool ShiftTap);
+
+    private readonly List<Input> _inputs = new();
+    private readonly InputRecord[] _records = new InputRecord[32];
+    private bool _shiftDown, _shiftClean;
+    private long _shiftDownAt;
+
+    /// <summary>
+    /// Drains everything waiting in the console input buffer. Read raw (ReadConsoleInput)
+    /// instead of Console.ReadKey, which silently discards modifier-only key events,
+    /// so a lone Shift tap can open the command menu. The list is reused between calls.
+    /// </summary>
+    public List<Input> ReadInput()
+    {
+        _inputs.Clear();
+        var handle = GetStdHandle(StdInputHandle);
+        while (GetNumberOfConsoleInputEvents(handle, out uint pending) && pending > 0)
+        {
+            if (!ReadConsoleInputW(handle, _records, (uint)_records.Length, out uint read) || read == 0) break;
+            for (int i = 0; i < read; i++)
+            {
+                if (_records[i].EventType != KeyEvent) continue; // resize/focus/mouse: the frame loop handles size
+                Translate(_records[i].Key);
+            }
+        }
+        return _inputs;
+    }
+
+    private void Translate(KeyEventRecord k)
+    {
+        const ushort VkShift = 0x10, VkControl = 0x11, VkMenu = 0x12, VkCapital = 0x14, VkLWin = 0x5B, VkRWin = 0x5C;
+        bool down = k.KeyDown != 0;
+        if (k.VirtualKeyCode == VkShift)
+        {
+            if (down && !_shiftDown) { _shiftDown = true; _shiftClean = true; _shiftDownAt = Environment.TickCount64; }
+            else if (!down && _shiftDown)
+            {
+                _shiftDown = false;
+                // A held Shift (or one used with another key) is not a tap.
+                if (_shiftClean && Environment.TickCount64 - _shiftDownAt < 500) _inputs.Add(new(default, ShiftTap: true));
+            }
+            return;
+        }
+        if (!down) return;
+        _shiftClean = false;
+        if (k.VirtualKeyCode is VkControl or VkMenu or VkCapital or VkLWin or VkRWin) return;
+
+        uint state = k.ControlKeyState;
+        bool shift = (state & 0x10) != 0, alt = (state & 0x3) != 0, ctrl = (state & 0xC) != 0;
+        // AltGr arrives as Ctrl+Alt with a printable character (e.g. @ on Spanish layouts): treat it as that character.
+        if (alt && ctrl && k.UnicodeChar != 0) alt = ctrl = false;
+        var info = new ConsoleKeyInfo(k.UnicodeChar, (ConsoleKey)k.VirtualKeyCode, shift, alt, ctrl);
+        for (int r = 0; r < Math.Max((ushort)1, k.RepeatCount); r++) _inputs.Add(new(info, ShiftTap: false));
+    }
+
+    private const int StdInputHandle = -10, StdOutputHandle = -11;
+    private const ushort KeyEvent = 0x0001;
+
+    /// <summary>
+    /// Windows Terminal interprets ANSI sequences out of the box, but the classic console
+    /// (conhost) only does once asked; without this it prints the escape codes as text.
+    /// </summary>
+    private static void EnableVirtualTerminal()
+    {
+        const uint ProcessedOutput = 0x1, VirtualTerminalProcessing = 0x4;
+        var handle = GetStdHandle(StdOutputHandle);
+        if (GetConsoleMode(handle, out uint mode))
+            SetConsoleMode(handle, mode | ProcessedOutput | VirtualTerminalProcessing);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetConsoleMode(IntPtr handle, uint mode);
+
+    [StructLayout(LayoutKind.Explicit, Size = 20)]
+    private struct InputRecord
+    {
+        [FieldOffset(0)] public ushort EventType;
+        [FieldOffset(4)] public KeyEventRecord Key;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct KeyEventRecord
+    {
+        public int KeyDown;
+        public ushort RepeatCount;
+        public ushort VirtualKeyCode;
+        public ushort VirtualScanCode;
+        public char UnicodeChar;
+        public uint ControlKeyState;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetNumberOfConsoleInputEvents(IntPtr handle, out uint count);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadConsoleInputW(IntPtr handle, [Out] InputRecord[] buffer, uint length, out uint read);
 
     /// <summary>The console input handle is a waitable kernel object: lets the loop sleep until a key arrives.</summary>
     private sealed class ConsoleInputWaitHandle : WaitHandle

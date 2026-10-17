@@ -50,7 +50,8 @@ Nation puede hacer de skin de otro reproductor sin tocar su audio (el streaming 
 
 - **Qué se ve**: título, artista, álbum, carátula (con su paleta de colores), posición/duración, estado, aleatorio/repetir y el nombre de la app (`◉ Spotify` en el encabezado). Letras sincronizadas desde LRCLIB por artista/título/duración. El espectro, el visualizador y las animaciones con el ritmo funcionan igual, porque la captura loopback escucha cualquier app (si la app quedó en otra salida de audio distinta a la predeterminada, el espectro no la oye).
 - **Qué se controla**: `espacio`, `n`/`p`, `←`/`→` (seek), `s`, `r`, y `+`/`-`/`m` mueven el volumen de *esa app* en el mezclador de Windows (en todas las salidas). La API para Shade y las teclas multimedia también actúan sobre la app seguida. Cuando Nation sigue a otra app, retira su propia sesión de SMTC para no aparecer duplicado.
-- **Cuándo cambia**: si otra app empieza a reproducir música mientras Nation está en pausa (o pausas Nation mientras otra suena), Nation la sigue sola. Un navegador solo cuenta si reporta álbum (YouTube Music lo hace, un video normal de YouTube no), así que ver videos no secuestra el reproductor. `o` alterna a mano entre la biblioteca y la otra app (sigue también videos), `enter` sobre una canción de la cola vuelve a la biblioteca, y si la otra app se cierra Nation regresa sola. La que queda atrás se pausa para que nunca suenen dos a la vez.
+- **Panel de fuentes (`o`)**: lista *Biblioteca local*, *Automático* y cada app con sesión de medios (Spotify, Brave, Chrome…) con su estado y lo que está sonando. `j`/`k` mueven, `enter` la usa: elegir una app la deja **fijada** (◆), así Nation sigue siempre a esa aunque otra suene; *Automático* quita la fijación. `a` activa/desactiva el auto-seguir. Se guarda en `%LOCALAPPDATA%\Nation\sources.json`.
+- **Auto-seguir**: si otra app empieza a reproducir música mientras Nation está en pausa (o pausas Nation mientras otra suena), Nation la sigue sola. Un navegador solo cuenta si reporta álbum (YouTube Music lo hace, un video normal de YouTube no), así que ver videos no secuestra el reproductor (elegido a mano desde el panel sí se sigue). `enter` sobre una canción de la cola vuelve a la biblioteca, y si la otra app se cierra Nation regresa sola. La que queda atrás se pausa para que nunca suenen dos a la vez.
 - **Límites**: el ecualizador solo procesa la música local (mpv); la cola y las playlists de Spotify no se exponen por SMTC, así que el panel izquierdo sigue mostrando la biblioteca local.
 
 ## Teclas multimedia de Windows
@@ -81,7 +82,7 @@ Nation expone en `127.0.0.1:7814` el mismo subconjunto de la API remota de Tauon
 | `s` | aleatorio on/off (la canción actual sigue sonando) |
 | `c` | saltar el cursor a la canción actual |
 | `r` | repetir cola on/off |
-| `o` | fuente: biblioteca local ↔ otra app (Spotify, YouTube Music…) |
+| `o` | panel de fuentes: biblioteca local, automático o una app fija (Spotify, YouTube Music…) |
 | `l` | mostrar / ocultar letra |
 | `f` | efectos ciberpunk on/off |
 | `e` | ecualizador |

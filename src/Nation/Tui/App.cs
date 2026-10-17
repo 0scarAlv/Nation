@@ -36,11 +36,10 @@ public sealed class App
     private int _lastIndex = -2;
     private double _trackChangedAt;
 
-    // Cyberpunk effects (toggle with `f`): decode-in text, glitch bursts, neon border runner.
+    // Cyberpunk effects (toggle with `f`): light-up text, glitch bursts, border runner.
     private bool _fx = true;
-    private Rgb _neon = Fx.Neon(ArtPalette.Default.Accent);
-    // Third hue (accent rotated -90°) and a hue wheel anchored on the cover, refreshed per frame.
-    private Rgb _third = Fx.Shift(ArtPalette.Default.Accent, 270);
+    // The cover's other dominant colors, and a 16-step gradient running through all four.
+    private Rgb _second = ArtPalette.Default.Second, _third = ArtPalette.Default.Third, _fourth = ArtPalette.Default.Fourth;
     private readonly Rgb[] _wheel = new Rgb[16];
     private double _glitchAt, _glitchUntil, _nextGlitch = 6;
     private int _glitchSeed;
@@ -338,9 +337,13 @@ public sealed class App
         double k = 1 - Math.Exp(-dt / 0.15);
         _palette = new ArtPalette(
             Rgb.Lerp(_palette.Accent, _targetPalette.Accent, k),
-            Rgb.Lerp(_palette.Backdrop, _targetPalette.Backdrop, k));
+            Rgb.Lerp(_palette.Backdrop, _targetPalette.Backdrop, k),
+            Rgb.Lerp(_palette.Second, _targetPalette.Second, k),
+            Rgb.Lerp(_palette.Third, _targetPalette.Third, k),
+            Rgb.Lerp(_palette.Fourth, _targetPalette.Fourth, k));
         // Byte steps round to zero near the target; snap once the gap is imperceptible.
-        if (Close(_palette.Accent, _targetPalette.Accent) && Close(_palette.Backdrop, _targetPalette.Backdrop))
+        if (Close(_palette.Accent, _targetPalette.Accent) && Close(_palette.Backdrop, _targetPalette.Backdrop)
+            && Close(_palette.Second, _targetPalette.Second) && Close(_palette.Third, _targetPalette.Third) && Close(_palette.Fourth, _targetPalette.Fourth))
             _palette = _targetPalette;
         else
             _animFast = true;
@@ -363,9 +366,16 @@ public sealed class App
 
     private void UpdateFx(double now)
     {
-        _neon = Fx.Neon(Accent);
-        _third = Fx.Shift(Accent, 270);
-        for (int i = 0; i < _wheel.Length; i++) _wheel[i] = Fx.Shift(Accent, i * 300.0 / (_wheel.Length - 1));
+        _second = _palette.Second;
+        _third = _palette.Third;
+        _fourth = _palette.Fourth;
+        Rgb[] stops = { Accent, _second, _third, _fourth };
+        for (int i = 0; i < _wheel.Length; i++)
+        {
+            double t = i / (double)(_wheel.Length - 1) * (stops.Length - 1);
+            int a = Math.Min((int)t, stops.Length - 2);
+            _wheel[i] = Rgb.Lerp(stops[a], stops[a + 1], t - a);
+        }
         _bass = Math.Max(Sample(_bars, 0.5), Sample(_bars, 2));
         if (!_fx) return;
         // Ambient bursts only while playing (the loop is at 30 fps then anyway); paused stays idle.
@@ -457,7 +467,7 @@ public sealed class App
     private Rgb Muted => _fx ? Rgb.Lerp(Theme.Muted, Accent, 0.3) : Theme.Muted;
     private Rgb Track => _fx ? Rgb.Lerp(Theme.Track, Accent, 0.25) : Theme.Track;
 
-    /// <summary>Color from the cover-anchored hue wheel, x in [0, 1].</summary>
+    /// <summary>Color from the gradient through the cover's four colors, x in [0, 1].</summary>
     private Rgb Wheel(double x) => _wheel[Math.Clamp((int)Math.Round(x * (_wheel.Length - 1)), 0, _wheel.Length - 1)];
 
     private void DrawHeader(Canvas c)
@@ -469,13 +479,13 @@ public sealed class App
         {
             int tick = GlitchTick;
             for (int i = 3; i < 9; i++)
-                if (Fx.Noise(tick, i) < 0.35) c.Recolor(1 + i, 0, Fx.Noise(tick, i + 90) < 0.5 ? _neon : Fx.Cyan);
+                if (Fx.Noise(tick, i) < 0.35) c.Recolor(1 + i, 0, Fx.Noise(tick, i + 90) < 0.5 ? _second : _fourth);
         }
         string state = _player.Idle ? "■ detenido" : _player.Paused ? "❚❚ pausa" : "▶ reproduciendo";
         if (state != _stateText) { _stateText = state; _stateChangedAt = Now; }
         double stateAge = Now - _stateChangedAt;
         if (stateAge < DecodeTime) _animFast = true;
-        var stateColor = !_fx ? Muted : _player.Idle ? Muted : _player.Paused ? Fx.Amber : _neon;
+        var stateColor = !_fx ? Muted : _player.Idle ? Muted : _player.Paused ? _fourth : _second;
         if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, stateColor, false, stateAge, row: 5)) c.Text(x, 0, state, stateColor);
         x += TextWidth.Of(state) + 3;
         if (_player.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
@@ -551,10 +561,10 @@ public sealed class App
             if (playing && !selected && _fx)
                 c.FillRow(rx, ry, inner, Rgb.Lerp(_palette.Backdrop, Accent, _player.Playing ? BassStep * 0.22 : 0));
             if (selected) c.FillRow(rx, ry, inner, selection);
-            if (selected && _fx) c.Set(rx, ry, '▌', _neon, selection);
-            else if (_fx && i == _prevCursor && trail < 1) c.Set(rx, ry, '▌', Rgb.Lerp(_neon, _palette.Backdrop, trail));
+            if (selected && _fx) c.Set(rx, ry, '▌', _second, selection);
+            else if (_fx && i == _prevCursor && trail < 1) c.Set(rx, ry, '▌', Rgb.Lerp(_second, _palette.Backdrop, trail));
             if (playing) DrawMiniEq(c, rx + 1, ry);
-            c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), _fx ? Rgb.Lerp(Muted, _neon, 0.35) : Muted);
+            c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), _fx ? Rgb.Lerp(Muted, _second, 0.35) : Muted);
 
             string dur = FormatTime(t.Duration.TotalSeconds);
             int textX = rx + 5 + numWidth + 2;
@@ -569,7 +579,7 @@ public sealed class App
                 for (int col = Math.Max(0, (int)sweep - 2); col <= sweep + 2 && col < used; col++)
                     c.Recolor(textX + col, ry, Rgb.Lerp(Accent, Fx.White, 1 - Math.Abs(col - sweep) / 3));
             }
-            c.Text(rx + inner - dur.Length - 1, ry, dur, _fx ? Rgb.Lerp(Muted, _neon, 0.25) : Muted);
+            c.Text(rx + inner - dur.Length - 1, ry, dur, _fx ? Rgb.Lerp(Muted, _second, 0.25) : Muted);
         }
     }
 
@@ -590,7 +600,7 @@ public sealed class App
         bool notice = Now - _visualChangedAt < 2;
         if (notice) _animSlow = true;
         string title = notice ? $"Reproduciendo · visual: {_visual.ToString().ToLowerInvariant()}" : "Reproduciendo";
-        var border = _fx ? Rgb.Lerp(BorderIn(_neon), _neon, BeatStep * 0.8) : PanelBorder;
+        var border = _fx ? Rgb.Lerp(BorderIn(_second), _second, BeatStep * 0.8) : PanelBorder;
         c.Box(x, y, w, h, title, border, notice ? Accent : Muted);
         if (_fx && _player.Playing) DrawBorderRunner(c, x, y, w, h);
         int ix = x + 3, iw = w - 6;
@@ -644,13 +654,13 @@ public sealed class App
         int volW = Math.Min(20, iw - 9), volFill = (int)Math.Round(_volShown / 100 * volW);
         var volColor = Rgb.Lerp(Accent, Fx.White, flash * 0.8);
         for (int i = 0; i < volW; i++)
-            c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i >= volFill ? Track : _fx ? Rgb.Lerp(Rgb.Lerp(Accent, _neon, i / (double)Math.Max(1, volW - 1)), Fx.White, flash * 0.8) : volColor);
+            c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i >= volFill ? Track : _fx ? Rgb.Lerp(Rgb.Lerp(Accent, _second, i / (double)Math.Max(1, volW - 1)), Fx.White, flash * 0.8) : volColor);
         DrawLevelMeter(c, ix + 9 + volW + 3, by + 3, iw - (9 + volW + 3));
     }
 
     private const string Horizontal = " ▏▎▍▌▋▊▉█";
 
-    /// <summary>Loudness meter with eighth-cell resolution, accent→neon→white, and a falling peak marker.</summary>
+    /// <summary>Loudness meter with eighth-cell resolution, through the cover colors to white, and a falling peak marker.</summary>
     private void DrawLevelMeter(Canvas c, int x, int y, int w)
     {
         if (w < 10) return;
@@ -661,7 +671,7 @@ public sealed class App
         for (int i = 0; i < mw; i++)
         {
             double t = mw <= 1 ? 0 : i / (double)(mw - 1);
-            var color = t < 0.7 ? Rgb.Lerp(Accent, _neon, t / 0.7) : Rgb.Lerp(_neon, Fx.White, (t - 0.7) / 0.3);
+            var color = t < 0.7 ? Rgb.Lerp(Accent, _second, t / 0.7) : Rgb.Lerp(_second, Fx.White, (t - 0.7) / 0.3);
             int fill = Math.Clamp((int)Math.Round((cells - i) * 8), 0, 8);
             if (fill > 0) c.Set(mx + i, y, Horizontal[fill], color);
             else if (i == peak && _levelPeak > 0.01) c.Set(mx + i, y, '▏', Fx.White);
@@ -689,12 +699,12 @@ public sealed class App
                 p < 2 * (w - 1) + h - 1 ? (x + w - 1 - (p - (w - 1 + h - 1)), y + h - 1) :
                 (x, y + h - 1 - (p - (2 * (w - 1) + h - 1)));
             double t = 1 - k / (double)tail;
-            c.Recolor(cx, cy, k == 0 ? Fx.White : Rgb.Lerp(PanelBorder, _neon, t * t));
+            c.Recolor(cx, cy, k == 0 ? Fx.White : Rgb.Lerp(PanelBorder, _second, t * t));
         }
     }
 
     /// <summary>
-    /// Draws text lighting up left to right with jitter: each character appears as a dim neon
+    /// Draws text lighting up left to right with jitter: each character appears as a dim
     /// ghost, then flashes white as it locks in. Returns false once the effect is over (caller draws normally).
     /// </summary>
     private bool DrawDecoded(Canvas c, int x, int y, int w, string text, Rgb fg, bool bold, double age, int row)
@@ -703,7 +713,7 @@ public sealed class App
         var runes = text.EnumerateRunes().ToArray();
         int n = Math.Max(1, runes.Length - 1), col = 0;
         double rowDelay = row * 0.05;
-        var ghost = Rgb.Lerp(_palette.Backdrop, _neon, 0.55);
+        var ghost = Rgb.Lerp(_palette.Backdrop, _second, 0.55);
         for (int i = 0; i < runes.Length; i++)
         {
             int rw = TextWidth.Of(runes[i]);
@@ -727,7 +737,7 @@ public sealed class App
         return true;
     }
 
-    /// <summary>Glitch burst on one row: horizontal tear plus a few neon-tinted cells.</summary>
+    /// <summary>Glitch burst on one row: horizontal tear plus a few cover-tinted cells.</summary>
     private void GlitchRow(Canvas c, int x, int y, int w, int row)
     {
         int tick = GlitchTick;
@@ -736,8 +746,8 @@ public sealed class App
         for (int col = 0; col < w; col++)
         {
             double r = Fx.Noise(tick, col + row * 131);
-            if (r < 0.06) c.Recolor(x + col, y, _neon);
-            else if (r < 0.10) c.Recolor(x + col, y, Fx.Cyan);
+            if (r < 0.06) c.Recolor(x + col, y, _second);
+            else if (r < 0.10) c.Recolor(x + col, y, _fourth);
         }
     }
 
@@ -758,7 +768,7 @@ public sealed class App
         bool on = _eq.Enabled;
         string title = $"Ecualizador · {_eq.PresetName}" + (on ? "" : " · apagado");
         if (_player.EqualizerError is { } err) title += $" · error: {err}";
-        var border = _fx ? Rgb.Lerp(BorderIn(_third), _neon, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
+        var border = _fx ? Rgb.Lerp(BorderIn(_third), _second, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
         c.Box(x, y, w, h, title, border, on ? Accent : Muted);
 
         int bands = Equalizer.Frequencies.Length;
@@ -820,7 +830,7 @@ public sealed class App
                 int ry = g > 0 ? centerRow - offset : centerRow + offset;
                 char ch = half ? (g > 0 ? '▄' : '▀') : '█';
                 double t = offset / (double)halfRange;
-                var color = !on ? Muted : u == halves && selected ? Fx.White : Rgb.Lerp(Accent, _neon, t);
+                var color = !on ? Muted : u == halves && selected ? Fx.White : Rgb.Lerp(Accent, _second, t);
                 c.Set(bx, ry, ch, color);
                 c.Set(bx + 1, ry, ch, color);
             }
@@ -973,7 +983,7 @@ public sealed class App
                 c.Text(cx, ry, text, Theme.Text, bold: true, maxWidth: iw);
                 var sung = _fx ? Rgb.Lerp(Accent, Fx.White, _beat * 0.4) : Accent;
                 for (int col = 0; col < rowFill; col++)
-                    c.Recolor(cx + col, ry, _fx ? Rgb.Lerp(Rgb.Lerp(Accent, _neon, col / (double)Math.Max(1, width - 1)), Fx.White, _beat * 0.4) : sung);
+                    c.Recolor(cx + col, ry, _fx ? Rgb.Lerp(Rgb.Lerp(Accent, _second, col / (double)Math.Max(1, width - 1)), Fx.White, _beat * 0.4) : sung);
                 if (_fx)
                 {
                     // White-hot edge where the karaoke fill is advancing.
@@ -1002,12 +1012,12 @@ public sealed class App
     {
         _animFast = true;
         int revealed = (int)(progress * width);
-        var ghost = Rgb.Lerp(_palette.Backdrop, _neon, 0.4);
+        var ghost = Rgb.Lerp(_palette.Backdrop, _second, 0.4);
         for (int col = revealed; col < width; col++) c.Recolor(x + col, y, ghost);
         if (revealed < width) c.Recolor(x + revealed, y, Fx.White);
     }
 
-    /// <summary>Startup: a diagonal CRT wipe reveals the UI, its leading edge a band of white-to-neon light.</summary>
+    /// <summary>Startup: a diagonal CRT wipe reveals the UI, its leading edge a band of white-to-cover-color light.</summary>
     private void DrawBoot(Canvas c, double progress)
     {
         _animFast = true;
@@ -1019,7 +1029,7 @@ public sealed class App
             {
                 double d = x + y * 2;
                 if (d > front) c.Reset(x, y);
-                else if (d > front - 6) c.Recolor(x, y, Rgb.Lerp(Fx.White, _neon, (front - d) / 6));
+                else if (d > front - 6) c.Recolor(x, y, Rgb.Lerp(Fx.White, _second, (front - d) / 6));
             }
     }
 
@@ -1176,7 +1186,7 @@ public sealed class App
                 int r = head - k;
                 if (r < 0 || r >= h) continue;
                 double t = k / (double)(trail + 1);
-                var color = k == 0 ? Fx.White : Rgb.Lerp(v > 0.5 ? _neon : Accent, _palette.Backdrop, t);
+                var color = k == 0 ? Fx.White : Rgb.Lerp(v > 0.5 ? _second : Accent, _palette.Backdrop, t);
                 c.Set(x + col, y + r, Fx.Glyph(col * 131 + r, k == 0 ? tick : _rainSeed[col]), color, bold: k == 0);
             }
         }
@@ -1188,7 +1198,7 @@ public sealed class App
         int count = Math.Max(1, (w + 1) / 2);
         int offsetX = x + (w - (count * 2 - 1)) / 2;
         var low = Rgb.Lerp(_palette.Backdrop, Accent, 0.45);
-        var peakColor = _fx ? Rgb.Lerp(_neon, Fx.White, 0.6) : Rgb.Lerp(Accent, Theme.Text, 0.5);
+        var peakColor = _fx ? Rgb.Lerp(_second, Fx.White, 0.6) : Rgb.Lerp(Accent, Theme.Text, 0.5);
 
         for (int b = 0; b < count; b++)
         {
@@ -1209,11 +1219,11 @@ public sealed class App
         }
     }
 
-    /// <summary>Bar color: backdrop to accent bottom-to-top; with fx, a cover-anchored hue sweep across the width.</summary>
+    /// <summary>Bar color: backdrop to accent bottom-to-top; with fx, a gradient through the cover's colors across the width.</summary>
     private Rgb SpectrumColor(Rgb low, double t, double x)
     {
         if (!_fx) return Rgb.Lerp(low, Accent, t);
-        // Hue sweeps across the width (cover hue at the left/center), brightening toward the top.
+        // The cover's colors sweep across the width (dominant one at the left/center), brightening toward the top.
         var hue = Wheel(x);
         var color = t < 0.7 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, hue, 0.5), hue, t / 0.7) : Rgb.Lerp(hue, Fx.White, (t - 0.7) / 0.3 * 0.35);
         return Rgb.Lerp(color, Fx.White, _beat * 0.35);
@@ -1233,7 +1243,7 @@ public sealed class App
         }
     }
 
-    /// <summary>Accent-to-neon gradient with a white-hot head and a light pulse running along the filled part.</summary>
+    /// <summary>Accent-to-second-color gradient with a white-hot head and a light pulse running along the filled part.</summary>
     private void DrawNeonProgress(Canvas c, int x, int y, int w, double fraction)
     {
         double cells = Math.Clamp(fraction, 0, 1) * w;
@@ -1246,7 +1256,7 @@ public sealed class App
         for (int i = 0; i < w; i++)
         {
             if (i > end) { c.Set(x + i, y, '─', Track); continue; }
-            var color = Rgb.Lerp(Accent, _neon, w <= 1 ? 0 : i / (double)(w - 1));
+            var color = Rgb.Lerp(Accent, _second, w <= 1 ? 0 : i / (double)(w - 1));
             double d = Math.Abs(i - pulse);
             foreach (var t0 in _ripples) d = Math.Min(d, Math.Abs(i - (end - (Now - t0) * 45)));
             if (d < 3) color = Rgb.Lerp(color, Fx.White, (1 - d / 3) * 0.7);
@@ -1278,7 +1288,7 @@ public sealed class App
         foreach (var (key, label) in _eqOpen ? EqHints : Hints)
         {
             if (x + key.Length + label.Length + 3 > quitX) break;
-            var keyColor = !_fx ? Accent : (hint++ % 3) switch { 0 => Accent, 1 => _neon, _ => _third };
+            var keyColor = !_fx ? Accent : (hint++ % 3) switch { 0 => Accent, 1 => _second, _ => _third };
             x += c.Text(x, y, key, keyColor) + 1;
             x += c.Text(x, y, label, Muted) + 2;
         }

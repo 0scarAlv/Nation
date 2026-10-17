@@ -109,6 +109,17 @@ public sealed class Canvas
         c.Fg = fg.Packed | (c.Fg & BoldBit);
     }
 
+    /// <summary>Returns one cell to blank with terminal-default colors.</summary>
+    public void Reset(int x, int y)
+    {
+        if (x < 0 || y < 0 || x >= Width || y >= Height) return;
+        int i = y * Width + x;
+        // Blanking either half of a wide glyph orphans the other half.
+        if (_cells[i].Ch == 0 && x > 0) _cells[i - 1].Ch = Space;
+        if (x + 1 < Width && _cells[i + 1].Ch == 0) _cells[i + 1].Ch = Space;
+        _cells[i] = new Cell { Ch = Space };
+    }
+
     /// <summary>Slides a row segment dx columns (glitch effect); vacated cells become blank.</summary>
     public void ShiftRow(int x, int y, int width, int dx)
     {

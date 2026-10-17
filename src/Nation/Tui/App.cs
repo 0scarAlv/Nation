@@ -42,6 +42,29 @@ public sealed class App
     private double _bass;
     private const double DecodeTime = 0.7;
 
+    // Beat detection: bass-weighted spectral flux against an adaptive threshold.
+    private readonly float[] _prevBands = new float[SpectrumAnalyzer.BandCount];
+    private DateTime _lastAnalyzerFrame;
+    private double _fluxAvg, _beat, _lastBeatAt = double.NegativeInfinity, _lastBeatGlitch = double.NegativeInfinity;
+    private readonly List<double> _ripples = new();
+
+    // Visualizer style (`v`) and the moment it changed, for the title notice.
+    private enum Visual { Barras, Espejo, Onda, Lluvia }
+    private Visual _visual = Visual.Barras;
+    private double _visualChangedAt = double.NegativeInfinity;
+    private double[] _rainY = Array.Empty<double>();
+    private int[] _rainSeed = Array.Empty<int>();
+
+    // Small general-purpose transitions.
+    private double _volShown = -1, _volTarget = -1, _volChangedAt = double.NegativeInfinity;
+    private string _stateText = "";
+    private double _stateChangedAt;
+    private int _lastCursor = -1, _prevCursor = -1;
+    private double _cursorMovedAt = double.NegativeInfinity;
+    private double _level, _levelPeak;
+    private double _dt;
+    private const double BootTime = 0.9;
+
     private readonly float[] _bars = new float[SpectrumAnalyzer.BandCount];
     private readonly float[] _peaks = new float[SpectrumAnalyzer.BandCount];
 
@@ -96,6 +119,10 @@ public sealed class App
             case ConsoleKey.C: JumpToCurrent(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
+            case ConsoleKey.V:
+                _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length);
+                _visualChangedAt = Now;
+                break;
             case ConsoleKey.R: _player.ToggleRepeat(); break;
             case ConsoleKey.RightArrow: _player.SeekRelative(shift ? 30 : 5); break;
             case ConsoleKey.LeftArrow: _player.SeekRelative(shift ? -30 : -5); break;
@@ -150,6 +177,7 @@ public sealed class App
     {
         double now = Now, dt = Math.Clamp(now - _lastFrame, 0, 0.1);
         _lastFrame = now;
+        _dt = dt;
         _animFast = _animSlow = false;
         _player.Refresh();
 
@@ -166,6 +194,7 @@ public sealed class App
         UpdatePalette(dt);
         UpdateSpectrum(dt);
         UpdateLyrics();
+        UpdateBeat(now, dt);
         UpdateFx(now);
 
         DrawHeader(c);
@@ -175,7 +204,8 @@ public sealed class App
 
         // Right column: player on top, lyrics below; on short terminals lyrics take it all.
         int rx = leftWidth, rw = c.Width - leftWidth;
-        const int playerHeight = 16;
+        // Taller terminals give the visualizer more rows.
+        int playerHeight = Math.Clamp(bodyHeight / 2 + 2, 16, 24);
         if (!_showLyrics)
             DrawNowPlaying(c, rx, bodyTop, rw, bodyHeight);
         else if (bodyHeight - playerHeight >= 6)
@@ -186,6 +216,7 @@ public sealed class App
         else
             DrawLyrics(c, rx, bodyTop, rw, bodyHeight, dt);
         DrawFooter(c);
+        if (_fx && now < BootTime) DrawBoot(c, now / BootTime);
         PublishRemote();
         Media?.Update(_player.Current, _player.Idle, _player.Paused, _player.Shuffled, _player.Repeat, _player.Position, _player.Duration);
 
@@ -250,10 +281,54 @@ public sealed class App
         if (_player.Playing && now >= _nextGlitch)
         {
             TriggerGlitch(now, 0.08 + Fx.Noise(_glitchSeed, 7) * 0.14);
-            _nextGlitch = now + 5 + Fx.Noise(_glitchSeed, 11) * 9;
+            _nextGlitch = now + 10 + Fx.Noise(_glitchSeed, 11) * 10;
         }
         if (now < _glitchUntil) _animFast = true;
     }
+
+    private void UpdateBeat(double now, double dt)
+    {
+        bool live = _player.Playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
+        var bands = _spectrum.Latest;
+        if (live && _spectrum.LastFrameUtc != _lastAnalyzerFrame)
+        {
+            _lastAnalyzerFrame = _spectrum.LastFrameUtc;
+            // Rising energy only, weighted toward the kick/bass bands.
+            double flux = 0;
+            for (int i = 0; i < 8; i++)
+                flux += Math.Max(0, bands[i] - _prevBands[i]) * (i < 4 ? 1.0 : 0.5);
+            Array.Copy(bands, _prevBands, bands.Length);
+            _fluxAvg += (flux - _fluxAvg) * 0.08;
+            if (flux > _fluxAvg * 1.6 + 0.08 && now - _lastBeatAt > 0.22)
+            {
+                double strength = Math.Clamp((flux - _fluxAvg) / 0.6, 0.35, 1);
+                _lastBeatAt = now;
+                _beat = Math.Max(_beat, strength);
+                if (_ripples.Count < 4) _ripples.Add(now);
+                // Hard hits glitch the metadata, with a cooldown so it never turns into strobe.
+                if (_fx && strength > 0.65 && now - _lastBeatGlitch > 3.5)
+                {
+                    _lastBeatGlitch = now;
+                    TriggerGlitch(now, 0.1);
+                }
+            }
+        }
+        _beat *= Math.Exp(-dt / 0.14);
+        if (_beat < 0.02) _beat = 0;
+        else _animFast = true;
+
+        // Overall loudness for the level meter: fast rise, slow fall, peak hold.
+        double target = 0;
+        foreach (var b in _bars) target += b;
+        target /= _bars.Length;
+        _level = target > _level ? target : Math.Max(target, _level - dt * 0.8);
+        _levelPeak = _level >= _levelPeak ? _level : Math.Max(0, _levelPeak - dt * 0.25);
+        if (_levelPeak > 0) _animFast = true;
+    }
+
+    /// <summary>Beat envelope stepped into a few levels so pulsing borders don't repaint every row every frame.</summary>
+    private double BeatStep => Math.Round(_beat * 4) / 4;
+    private double BassStep => Math.Round(_bass * 4) / 4;
 
     private void UpdateSpectrum(double dt)
     {
@@ -292,8 +367,8 @@ public sealed class App
     private void DrawHeader(Canvas c)
     {
         // Logo glows with the bass and stutters during glitch bursts.
-        var logo = _fx ? Rgb.Lerp(Accent, Fx.White, _bass * 0.75) : Accent;
-        int x = c.Text(1, 0, "◆ NATION", logo, bold: true) + 3;
+        var logo = _fx ? Rgb.Lerp(Accent, Fx.White, Math.Max(_bass * 0.6, _beat)) : Accent;
+        int x = c.Text(1, 0, _fx && _beat > 0.5 ? "◈ NATION" : "◆ NATION", logo, bold: true) + 3;
         if (Glitching)
         {
             int tick = GlitchTick;
@@ -301,7 +376,11 @@ public sealed class App
                 if (Fx.Noise(tick, i) < 0.35) c.Set(1 + i, 0, Fx.Glyph(tick, i + 50), Fx.Noise(tick, i + 90) < 0.5 ? _neon : Fx.White, bold: true);
         }
         string state = _player.Idle ? "■ detenido" : _player.Paused ? "❚❚ pausa" : "▶ reproduciendo";
-        x += c.Text(x, 0, state, Theme.Muted) + 3;
+        if (state != _stateText) { _stateText = state; _stateChangedAt = Now; }
+        double stateAge = Now - _stateChangedAt;
+        if (stateAge < DecodeTime) _animFast = true;
+        if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, Theme.Muted, false, stateAge, row: 5)) c.Text(x, 0, state, Theme.Muted);
+        x += TextWidth.Of(state) + 3;
         if (_player.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
         if (_player.Repeat) c.Text(x, 0, "⟳ repetir", Accent);
 
@@ -355,6 +434,13 @@ public sealed class App
         _scroll = Math.Clamp(_scroll, 0, Math.Max(0, queue.Count - rows));
 
         var selection = Rgb.Lerp(_palette.Backdrop, Theme.Selection, 0.25);
+        if (_cursor != _lastCursor)
+        {
+            if (_lastCursor >= 0) { _prevCursor = _lastCursor; _cursorMovedAt = Now; }
+            _lastCursor = _cursor;
+        }
+        double trail = (Now - _cursorMovedAt) / 0.3;
+        if (_fx && trail < 1) _animFast = true;
         int numWidth = Math.Max(2, queue.Count.ToString().Length);
         for (int row = 0; row < rows; row++)
         {
@@ -364,8 +450,12 @@ public sealed class App
             int ry = y + 1 + row, rx = x + 1;
             bool playing = i == current, selected = i == _cursor;
 
+            // Playing row: a band of the cover's backdrop that brightens with the bass.
+            if (playing && !selected && _fx)
+                c.FillRow(rx, ry, inner, Rgb.Lerp(_palette.Backdrop, Accent, _player.Playing ? BassStep * 0.22 : 0));
             if (selected) c.FillRow(rx, ry, inner, selection);
             if (selected && _fx) c.Set(rx, ry, '▌', _neon, selection);
+            else if (_fx && i == _prevCursor && trail < 1) c.Set(rx, ry, '▌', Rgb.Lerp(_neon, _palette.Backdrop, trail));
             if (playing) DrawMiniEq(c, rx + 1, ry);
             c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), Theme.Muted);
 
@@ -400,7 +490,11 @@ public sealed class App
 
     private void DrawNowPlaying(Canvas c, int x, int y, int w, int h)
     {
-        c.Box(x, y, w, h, "Reproduciendo", PanelBorder, Theme.Muted);
+        bool notice = Now - _visualChangedAt < 2;
+        if (notice) _animSlow = true;
+        string title = notice ? $"Reproduciendo · visual: {_visual.ToString().ToLowerInvariant()}" : "Reproduciendo";
+        var border = _fx ? Rgb.Lerp(PanelBorder, _neon, BeatStep * 0.8) : PanelBorder;
+        c.Box(x, y, w, h, title, border, notice ? Accent : Theme.Muted);
         if (_fx && _player.Playing) DrawBorderRunner(c, x, y, w, h);
         int ix = x + 3, iw = w - 6;
         var t = _player.Current;
@@ -433,7 +527,7 @@ public sealed class App
         // Transport block sits at the bottom; the spectrum fills what's between.
         int by = Math.Max(y + h - 5, y + 9);
         int specTop = y + 7, specBottom = by - 2;
-        if (specBottom - specTop >= 1) DrawSpectrum(c, ix, specTop, iw, specBottom - specTop + 1);
+        if (specBottom - specTop >= 1) DrawVisual(c, ix, specTop, iw, specBottom - specTop + 1);
 
         double pos = _player.Position, dur = _player.Duration;
         DrawProgress(c, ix, by, iw, dur > 0 ? pos / dur : 0);
@@ -443,9 +537,39 @@ public sealed class App
 
         string volLabel = _player.Muted ? "vol mute" : $"vol {_player.Volume,3:0}";
         c.Text(ix, by + 3, volLabel, Theme.Muted);
-        int volW = Math.Min(20, iw - 9), volFill = _player.Muted ? 0 : (int)Math.Round(_player.Volume / 100 * volW);
+        // The bar glides to the new level and flashes after a change.
+        double vol = _player.Muted ? 0 : _player.Volume;
+        if (vol != _volTarget) { if (_volTarget >= 0) _volChangedAt = Now; _volTarget = vol; }
+        _volShown = _volShown < 0 ? vol : _volShown + (vol - _volShown) * 0.35;
+        if (Math.Abs(_volShown - vol) < 0.5) _volShown = vol; else _animFast = true;
+        double flash = Math.Clamp(1 - (Now - _volChangedAt) / 0.4, 0, 1);
+        if (flash > 0) _animFast = true;
+        int volW = Math.Min(20, iw - 9), volFill = (int)Math.Round(_volShown / 100 * volW);
+        var volColor = Rgb.Lerp(Accent, Fx.White, flash * 0.8);
         for (int i = 0; i < volW; i++)
-            c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i < volFill ? Accent : Theme.Track);
+            c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i < volFill ? volColor : Theme.Track);
+        DrawLevelMeter(c, ix + 9 + volW + 3, by + 3, iw - (9 + volW + 3));
+    }
+
+    private const string Horizontal = " ▏▎▍▌▋▊▉█";
+
+    /// <summary>Loudness meter with eighth-cell resolution, accent→neon→white, and a falling peak marker.</summary>
+    private void DrawLevelMeter(Canvas c, int x, int y, int w)
+    {
+        if (w < 10) return;
+        c.Text(x, y, "nivel", Theme.Muted);
+        int mx = x + 6, mw = Math.Min(24, w - 6);
+        double cells = Math.Clamp(_level * 1.6, 0, 1) * mw;
+        int peak = (int)Math.Min(mw - 1, Math.Clamp(_levelPeak * 1.6, 0, 1) * mw);
+        for (int i = 0; i < mw; i++)
+        {
+            double t = mw <= 1 ? 0 : i / (double)(mw - 1);
+            var color = t < 0.7 ? Rgb.Lerp(Accent, _neon, t / 0.7) : Rgb.Lerp(_neon, Fx.White, (t - 0.7) / 0.3);
+            int fill = Math.Clamp((int)Math.Round((cells - i) * 8), 0, 8);
+            if (fill > 0) c.Set(mx + i, y, Horizontal[fill], color);
+            else if (i == peak && _levelPeak > 0.01) c.Set(mx + i, y, '▏', Fx.White);
+            else c.Set(mx + i, y, '·', Theme.Track);
+        }
     }
 
     private Rgb PanelBorder => _fx ? Rgb.Lerp(Theme.Border, Accent, 0.3) : Theme.Border;
@@ -635,8 +759,9 @@ public sealed class App
                 for (int k = wi - 1; k >= 0 && wrapped[k].Line == active; k--) before += TextWidth.Of(wrapped[k].Text);
                 int rowFill = Math.Clamp(filledCols - before, 0, width);
                 c.Text(cx, ry, text, Theme.Text, bold: true, maxWidth: iw);
+                var sung = _fx ? Rgb.Lerp(Accent, Fx.White, _beat * 0.4) : Accent;
                 for (int col = 0; col < rowFill; col++)
-                    c.Recolor(cx + col, ry, Accent);
+                    c.Recolor(cx + col, ry, sung);
                 if (_fx)
                 {
                     // White-hot edge where the karaoke fill is advancing.
@@ -674,6 +799,23 @@ public sealed class App
                     c.Set(x + col + k, y, Fx.Glyph(col + k + seed * 53, tick), _neon, bold: true);
             col += rw;
         }
+    }
+
+    /// <summary>Startup: a diagonal CRT wipe reveals the UI, with a band of noise glyphs on the leading edge.</summary>
+    private void DrawBoot(Canvas c, double progress)
+    {
+        _animFast = true;
+        double eased = 1 - Math.Pow(1 - progress, 2);
+        double span = c.Width + c.Height * 2 + 8;
+        double front = eased * span;
+        int tick = (int)(Now * 25);
+        for (int y = 0; y < c.Height; y++)
+            for (int x = 0; x < c.Width; x++)
+            {
+                double d = x + y * 2;
+                if (d > front) c.Reset(x, y);
+                else if (d > front - 6) c.Set(x, y, Fx.Glyph(x * 31 + y, tick), Rgb.Lerp(Fx.White, _neon, (front - d) / 6));
+            }
     }
 
     private string Instrumental()
@@ -734,6 +876,107 @@ public sealed class App
         c.Text(x, y, sb.ToString(), fg, bold: bold, maxWidth: w, ellipsis: false);
     }
 
+    private void DrawVisual(Canvas c, int x, int y, int w, int h)
+    {
+        switch (_visual)
+        {
+            case Visual.Espejo: DrawMirror(c, x, y, w, h); break;
+            case Visual.Onda: DrawWave(c, x, y, w, h); break;
+            case Visual.Lluvia: DrawRain(c, x, y, w, h); break;
+            default: DrawSpectrum(c, x, y, w, h); break;
+        }
+    }
+
+    /// <summary>Bars grow up and down from the middle row, bass in the center, treble toward both edges.</summary>
+    private void DrawMirror(Canvas c, int x, int y, int w, int h)
+    {
+        int count = Math.Max(1, (w + 1) / 2);
+        int offsetX = x + (w - (count * 2 - 1)) / 2;
+        int mid = h; // in half-rows: 2h half-rows, middle line between h-1 and h
+        var low = Rgb.Lerp(_palette.Backdrop, Accent, 0.45);
+        for (int b = 0; b < count; b++)
+        {
+            double fromCenter = Math.Abs(b - (count - 1) / 2.0) / Math.Max(1, (count - 1) / 2.0);
+            double v = Sample(_bars, fromCenter * (SpectrumAnalyzer.BandCount - 1));
+            int k = (int)Math.Round(v * h);
+            if (k == 0) continue;
+            int cx = offsetX + b * 2;
+            for (int r = 0; r < h; r++)
+            {
+                bool top = 2 * r >= mid - k && 2 * r < mid + k;
+                bool bottom = 2 * r + 1 >= mid - k && 2 * r + 1 < mid + k;
+                if (!top && !bottom) continue;
+                double dist = Math.Abs(r + 0.5 - h / 2.0) / Math.Max(1, h / 2.0);
+                c.Set(cx, y + r, top && bottom ? '█' : top ? '▀' : '▄', SpectrumColor(low, dist));
+            }
+        }
+    }
+
+    private static readonly int[,] BrailleBits = { { 0x01, 0x08 }, { 0x02, 0x10 }, { 0x04, 0x20 }, { 0x40, 0x80 } };
+
+    /// <summary>Filled waveform-like ridge in braille dots: 2×4 sub-cell resolution, interpolated across bands.</summary>
+    private void DrawWave(Canvas c, int x, int y, int w, int h)
+    {
+        int dotsW = w * 2, dotsH = h * 4;
+        var low = Rgb.Lerp(_palette.Backdrop, Accent, 0.45);
+        Span<int> heights = stackalloc int[2];
+        for (int cx = 0; cx < w; cx++)
+        {
+            for (int sub = 0; sub < 2; sub++)
+            {
+                double pos = (cx * 2 + sub) / (double)Math.Max(1, dotsW - 1) * (SpectrumAnalyzer.BandCount - 1);
+                heights[sub] = (int)Math.Round(Sample(_bars, pos) * dotsH);
+            }
+            for (int r = 0; r < h; r++)
+            {
+                int bits = 0;
+                for (int dy = 0; dy < 4; dy++)
+                {
+                    int fromBottom = dotsH - 1 - (r * 4 + dy);
+                    for (int sub = 0; sub < 2; sub++)
+                        // The top dot of each column is always lit so the ridge reads as a line.
+                        if (fromBottom < heights[sub] || (fromBottom == 0 && heights[sub] == 0)) bits |= BrailleBits[dy, sub];
+                }
+                if (bits == 0) continue;
+                double t = h == 1 ? 1 : (h - 1 - r) / (double)(h - 1);
+                c.Set(x + cx, y + r, (char)(0x2800 + bits), SpectrumColor(low, t));
+            }
+        }
+    }
+
+    /// <summary>Katakana rain: one stream per column, falling faster and with longer tails where its band is loud.</summary>
+    private void DrawRain(Canvas c, int x, int y, int w, int h)
+    {
+        if (_rainY.Length != w)
+        {
+            _rainY = new double[w];
+            _rainSeed = new int[w];
+            for (int i = 0; i < w; i++) { _rainY[i] = Fx.Noise(i, 3) * h * 2; _rainSeed[i] = i * 7919; }
+        }
+        double dt = _dt;
+        int tick = (int)(Now * 14);
+        for (int col = 0; col < w; col++)
+        {
+            double v = Sample(_bars, col / (double)Math.Max(1, w - 1) * (SpectrumAnalyzer.BandCount - 1));
+            if (_player.Playing) _rainY[col] += (2 + v * 28) * dt;
+            int trail = 1 + (int)(v * h * 1.5);
+            if (_rainY[col] - trail > h)
+            {
+                _rainY[col] = -Fx.Noise(_rainSeed[col], 1) * h;
+                _rainSeed[col]++;
+            }
+            int head = (int)_rainY[col];
+            for (int k = 0; k <= trail; k++)
+            {
+                int r = head - k;
+                if (r < 0 || r >= h) continue;
+                double t = k / (double)(trail + 1);
+                var color = k == 0 ? Fx.White : Rgb.Lerp(v > 0.5 ? _neon : Accent, _palette.Backdrop, t);
+                c.Set(x + col, y + r, Fx.Glyph(col * 131 + r, k == 0 ? tick : _rainSeed[col]), color, bold: k == 0);
+            }
+        }
+    }
+
     private void DrawSpectrum(Canvas c, int x, int y, int w, int h)
     {
         // One-column bars with one-column gaps, resampled from the 32 analyzer bands.
@@ -765,7 +1008,8 @@ public sealed class App
     private Rgb SpectrumColor(Rgb low, double t)
     {
         if (!_fx) return Rgb.Lerp(low, Accent, t);
-        return t < 0.6 ? Rgb.Lerp(low, Accent, t / 0.6) : Rgb.Lerp(Accent, _neon, (t - 0.6) / 0.4);
+        var color = t < 0.6 ? Rgb.Lerp(low, Accent, t / 0.6) : Rgb.Lerp(Accent, _neon, (t - 0.6) / 0.4);
+        return Rgb.Lerp(color, Fx.White, _beat * 0.35);
     }
 
     private void DrawProgress(Canvas c, int x, int y, int w, double fraction)
@@ -789,12 +1033,15 @@ public sealed class App
         int full = (int)cells;
         bool half = cells - full >= 0.5;
         int end = half ? full : full - 1; // last lit column
-        double pulse = _player.Playing ? Now % 2.4 / 2.4 * (end + 10) - 5 : double.NaN;
+        bool beating = Now - _lastBeatAt < 3;
+        double pulse = _player.Playing && !beating ? Now % 2.4 / 2.4 * (end + 10) - 5 : double.NaN;
+        _ripples.RemoveAll(t0 => (Now - t0) * 45 > end + 4);
         for (int i = 0; i < w; i++)
         {
             if (i > end) { c.Set(x + i, y, '─', Theme.Track); continue; }
             var color = Rgb.Lerp(Accent, _neon, w <= 1 ? 0 : i / (double)(w - 1));
             double d = Math.Abs(i - pulse);
+            foreach (var t0 in _ripples) d = Math.Min(d, Math.Abs(i - (end - (Now - t0) * 45)));
             if (d < 3) color = Rgb.Lerp(color, Fx.White, (1 - d / 3) * 0.7);
             if (i == end) color = Fx.White;
             c.Set(x + i, y, i == full ? '╸' : '━', color);
@@ -803,7 +1050,7 @@ public sealed class App
 
     private static readonly (string Key, string Label)[] Hints =
     {
-        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"), ("f", "fx"),
+        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"), ("f", "fx"), ("v", "visual"),
         ("+/-", "vol"), ("m", "mute"), ("enter", "reproducir"), (",/.", "desfase"), ("c", "actual"), ("j/k", "mover"),
     };
 

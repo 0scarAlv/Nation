@@ -11,6 +11,8 @@ namespace Nation.Audio;
 public sealed class SpectrumAnalyzer : IDisposable
 {
     public const int BandCount = 32;
+    /// <summary>Finer, log-spaced bands (30 Hz – 16 kHz) for the spectrogram; same FFT, same frame.</summary>
+    public const int FineCount = 96;
     private const int FftLength = 2048;
     private const int FftExponent = 11; // 2^11 = FftLength
     // 50% overlap: a new frame every 1024 samples (~47 fps at 48 kHz).
@@ -24,6 +26,11 @@ public sealed class SpectrumAnalyzer : IDisposable
 
     /// <summary>Most recent bands in [0,1]; replaced atomically by the capture thread.</summary>
     public float[] Latest { get; private set; } = new float[BandCount];
+
+    /// <summary>Most recent fine bands in [0,1], replaced together with Latest.</summary>
+    public float[] LatestFine { get; private set; } = new float[FineCount];
+
+    private readonly float[] _magnitudes = new float[FftLength / 2];
 
     /// <summary>When the last frame arrived; loopback delivers nothing during silence.</summary>
     public DateTime LastFrameUtc { get; private set; }
@@ -96,6 +103,8 @@ public sealed class SpectrumAnalyzer : IDisposable
 
         var bands = new float[BandCount];
         var usableBins = FftLength / 2;
+        for (var bin = 0; bin < usableBins; bin++)
+            _magnitudes[bin] = MathF.Sqrt(_fftBuffer[bin].X * _fftBuffer[bin].X + _fftBuffer[bin].Y * _fftBuffer[bin].Y);
         for (var band = 0; band < BandCount; band++)
         {
             // Squared spacing: narrow bass bands, wide treble bands.
@@ -106,7 +115,7 @@ public sealed class SpectrumAnalyzer : IDisposable
             var count = 0;
             for (var bin = lowBin; bin < highBin && bin < usableBins; bin++)
             {
-                sum += MathF.Sqrt(_fftBuffer[bin].X * _fftBuffer[bin].X + _fftBuffer[bin].Y * _fftBuffer[bin].Y);
+                sum += _magnitudes[bin];
                 count++;
             }
 
@@ -114,8 +123,46 @@ public sealed class SpectrumAnalyzer : IDisposable
             bands[band] = Math.Clamp(MathF.Log10(1 + magnitude * _bandGain[band] * 200) / 1.4f, 0f, 1f);
         }
 
+        LatestFine = FineBands(_capture?.WaveFormat.SampleRate ?? 48000);
         Latest = bands;
         LastFrameUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Log-spaced bands like a real spectrogram (Spek, Audacity): equal width per octave.
+    /// Bass bands are narrower than one FFT bin, so they read the magnitude
+    /// interpolated at their center instead of averaging bins.
+    /// </summary>
+    private float[] FineBands(int sampleRate)
+    {
+        const double low = 30, high = 16000;
+        var fine = new float[FineCount];
+        double binHz = sampleRate / (double)FftLength;
+        for (var band = 0; band < FineCount; band++)
+        {
+            double f0 = low * Math.Pow(high / low, band / (double)FineCount);
+            double f1 = low * Math.Pow(high / low, (band + 1) / (double)FineCount);
+            double b0 = f0 / binHz, b1 = f1 / binHz;
+            float magnitude;
+            if (b1 - b0 < 1)
+            {
+                double center = (b0 + b1) / 2;
+                int i = Math.Clamp((int)center, 0, _magnitudes.Length - 2);
+                float t = (float)(center - i);
+                magnitude = _magnitudes[i] * (1 - t) + _magnitudes[i + 1] * t;
+            }
+            else
+            {
+                float sum = 0;
+                int count = 0;
+                for (var bin = (int)b0; bin < (int)Math.Ceiling(b1) && bin < _magnitudes.Length; bin++) { sum += _magnitudes[bin]; count++; }
+                magnitude = count > 0 ? sum / count : 0;
+            }
+            // Same treble tilt compensation as the coarse bands (up to +18 dB).
+            float gain = MathF.Pow(10f, band / (float)(FineCount - 1) * 18f / 20f);
+            fine[band] = Math.Clamp(MathF.Log10(1 + magnitude * gain * 200) / 1.4f, 0f, 1f);
+        }
+        return fine;
     }
 
     /// <summary>Stops capturing (idempotent); the UI stops it while Nation isn't playing.</summary>
@@ -128,6 +175,7 @@ public sealed class SpectrumAnalyzer : IDisposable
         _capture = null;
         _sampleCount = 0;
         Latest = new float[BandCount];
+        LatestFine = new float[FineCount];
     }
 
     public void Dispose() => Stop();

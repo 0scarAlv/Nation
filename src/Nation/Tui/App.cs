@@ -712,6 +712,20 @@ public sealed class App
     /// <summary>--demo-spectrum (snapshots): synthetic moving bands so visualizers can be checked without audio.</summary>
     public bool DemoSpectrum { get; init; }
 
+    private float[] DemoFine()
+    {
+        var fine = new float[SpectrumAnalyzer.FineCount];
+        var coarse = DemoBands();
+        for (int i = 0; i < fine.Length; i++)
+        {
+            double v = Sample(coarse, i / (double)(fine.Length - 1) * (SpectrumAnalyzer.BandCount - 1));
+            // A few moving "harmonics" so the demo has lines to resolve.
+            double line = Math.Max(0, 1 - Math.Abs(i - (30 + 20 * Math.Sin(Now * 1.3))) / 2.0);
+            fine[i] = (float)Math.Clamp(v * 0.7 + line * 0.6, 0, 1);
+        }
+        return fine;
+    }
+
     private float[] DemoBands()
     {
         var bands = new float[SpectrumAnalyzer.BandCount];
@@ -727,9 +741,9 @@ public sealed class App
         if (playing) _spectrum.Start();
         bool live = DemoSpectrum || playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
         var target = DemoSpectrum ? DemoBands() : _spectrum.Latest;
-        // The spectrogram wants the analyzer's frames as they are, not the falling bars.
-        if (live) Array.Copy(target, _rawBands, _rawBands.Length);
-        else Array.Clear(_rawBands);
+        // The spectrogram wants the analyzer's fine frames as they are, not the falling bars.
+        if (live) Array.Copy(DemoSpectrum ? DemoFine() : _spectrum.LatestFine, _rawFine, _rawFine.Length);
+        else Array.Clear(_rawFine);
         bool moving = false;
         for (int i = 0; i < _bars.Length; i++)
         {
@@ -1778,20 +1792,28 @@ public sealed class App
         FlushDots(c, x, y, w, h, (col, row) => Rgb.Lerp(Wheel(col / (double)Math.Max(1, w - 1)), Fx.White, _beat * 0.4));
     }
 
-    // Spectrogram history, oldest first; one column every CascadeStep seconds.
+    // Spectrogram history, oldest first; one braille dot column every CascadeStep seconds.
     private readonly List<float[]> _cascade = new();
-    private readonly float[] _rawBands = new float[SpectrumAnalyzer.BandCount];
+    private readonly float[] _rawFine = new float[SpectrumAnalyzer.FineCount];
     private double _cascadeClock = double.NegativeInfinity;
-    private const double CascadeStep = 0.04;
+    private const double CascadeStep = 0.03;
+
+    // 4x4 ordered-dither thresholds: loudness shows as dot density inside each braille cell.
+    private static readonly double[,] Bayer =
+    {
+        { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 },
+    };
 
     /// <summary>
-    /// Horizontal spectrogram, like Audacity or Spek: time runs right to left, bass at the
-    /// bottom, treble at the top, two frequency rows per cell (half blocks), colored by
-    /// loudness through the cover's colors. Built from the raw analyzer frames so hits stay
-    /// sharp; freezes while paused. Quiet cells stay unpainted (transparent).
+    /// Horizontal spectrogram, like Spek or Audacity: time runs right to left, bass at the
+    /// bottom, treble at the top. Drawn in braille (2 time × 4 frequency dots per cell) from
+    /// 96 log-spaced bands; a cell holds one color, so loudness is shown by dot density
+    /// (ordered dithering) and the cell takes the color of its loudest dot.
+    /// Freezes while paused; silent cells stay unpainted (transparent).
     /// </summary>
     private void DrawCascade(Canvas c, int x, int y, int w, int h)
     {
+        int columns = w * 2, rows = h * 4;
         bool running = Playback.Playing || DemoSpectrum;
         if (!running) _cascadeClock = Now;
         else if (_cascadeClock < Now - 0.5) _cascadeClock = Now; // resume without a burst of catch-up columns
@@ -1799,39 +1821,50 @@ public sealed class App
         while (running && _cascadeClock + CascadeStep <= Now)
         {
             _cascadeClock += CascadeStep;
-            var column = _cascade.Count >= w && _cascade.Count > 0 ? _cascade[0] : new float[SpectrumAnalyzer.BandCount];
-            if (_cascade.Count >= w && _cascade.Count > 0) _cascade.RemoveAt(0);
-            Array.Copy(_rawBands, column, column.Length);
+            var column = _cascade.Count >= columns && _cascade.Count > 0 ? _cascade[0] : new float[SpectrumAnalyzer.FineCount];
+            if (_cascade.Count >= columns && _cascade.Count > 0) _cascade.RemoveAt(0);
+            Array.Copy(_rawFine, column, column.Length);
             _cascade.Add(column);
         }
-        while (_cascade.Count > w) _cascade.RemoveAt(0);
+        while (_cascade.Count > columns) _cascade.RemoveAt(0);
 
-        Rgb? Heat(float raw)
+        // Value of every dot row for one column: fine bands resampled to the panel height.
+        double Level(float[] frame, int dotRow)
         {
-            // Gamma lifts quiet detail without washing out the loud parts.
-            double v = Math.Pow(Math.Clamp(raw, 0, 1), 0.75);
-            if (v < 0.08) return null;
-            return v < 0.4 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, Accent, 0.3), Accent, (v - 0.08) / 0.32)
-                : v < 0.72 ? Rgb.Lerp(Accent, _second, (v - 0.4) / 0.32)
-                : Rgb.Lerp(_second, Fx.White, (v - 0.72) / 0.28 * 0.8);
+            double pos = (rows - 1 - dotRow) / (double)Math.Max(1, rows - 1) * (SpectrumAnalyzer.FineCount - 1);
+            int i = (int)pos;
+            double f = pos - i, v = i >= frame.Length - 1 ? frame[^1] : frame[i] * (1 - f) + frame[i + 1] * f;
+            // Gamma lifts quiet detail; the floor keeps background hiss from speckling the panel.
+            v = Math.Pow(Math.Clamp(v, 0, 1), 0.8);
+            return v < 0.1 ? 0 : (v - 0.1) / 0.9;
         }
 
-        int bins = h * 2;
-        int first = w - _cascade.Count; // newest column sits at the right edge
-        for (int col = Math.Max(0, first); col < w; col++)
-        {
-            var frame = _cascade[col - first];
+        int first = columns - _cascade.Count; // newest column sits at the right edge
+        for (int cx = 0; cx < w; cx++)
             for (int r = 0; r < h; r++)
             {
-                // Screen row r covers bins (top, bottom); bin 0 = bass at the panel's bottom.
-                int topBin = bins - 1 - r * 2, bottomBin = topBin - 1;
-                var top = Heat(Sample(frame, topBin / (double)(bins - 1) * (SpectrumAnalyzer.BandCount - 1)));
-                var bottom = Heat(Sample(frame, bottomBin / (double)(bins - 1) * (SpectrumAnalyzer.BandCount - 1)));
-                if (top is { } t && bottom is { } u) c.Set(x + col, y + r, '▀', t, u);
-                else if (top is { } t2) c.Set(x + col, y + r, '▀', t2);
-                else if (bottom is { } u2) c.Set(x + col, y + r, '▄', u2);
+                int bits = 0;
+                double loudest = 0;
+                for (int sub = 0; sub < 2; sub++)
+                {
+                    int col = cx * 2 + sub, index = col - first;
+                    if (index < 0) continue;
+                    var frame = _cascade[index];
+                    for (int dy = 0; dy < 4; dy++)
+                    {
+                        int dotRow = r * 4 + dy;
+                        double v = Level(frame, dotRow);
+                        if (v <= 0) continue;
+                        loudest = Math.Max(loudest, v);
+                        if (v * 16 > Bayer[dotRow & 3, col & 3]) bits |= BrailleBits[dy, sub];
+                    }
+                }
+                if (bits == 0) continue;
+                var color = loudest < 0.4 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, Accent, 0.4), Accent, loudest / 0.4)
+                    : loudest < 0.75 ? Rgb.Lerp(Accent, _second, (loudest - 0.4) / 0.35)
+                    : Rgb.Lerp(_second, Fx.White, (loudest - 0.75) / 0.25 * 0.8);
+                c.Set(x + cx, y + r, (char)(0x2800 + bits), color);
             }
-        }
     }
 
     /// <summary>Bars standing on water: the lower third mirrors them, dimmer, with a rippling shimmer.</summary>

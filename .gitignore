@@ -1,0 +1,7 @@
+bin/
+obj/
+.vs/
+*.user
+# libmpv is ~120 MB; fetched by scripts/fetch-libmpv.ps1
+native/
+dist/

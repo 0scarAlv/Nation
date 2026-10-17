@@ -60,7 +60,7 @@ using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null
 var sources = SourceSettings.Load();
 using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, Sources = sources, PersistSession = snapshotPath is null };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, Sources = sources, Ui = UiSettings.Load(), PersistSession = snapshotPath is null };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;

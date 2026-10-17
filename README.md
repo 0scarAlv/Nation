@@ -21,9 +21,9 @@ Arranca en pausa donde te quedaste: la última canción, en el segundo en que la
 - **Espectro**: captura WASAPI loopback (portado del `SpectrumAnalyzer` de Shade). Escucha la salida completa del sistema; mientras Nation está en pausa las barras caen.
 - **Letras**: incrustadas (SYLT sincronizado en MP3, `LYRICS`/`UNSYNCEDLYRICS` en FLAC/Opus, etc.) → `.lrc`/`.txt` junto al archivo → LRCLIB. Si la letra local no está sincronizada se busca una versión sincronizada en LRCLIB. Lo descargado se cachea en `%LOCALAPPDATA%\Nation\lyrics` (incluidos los "no encontrado"), así cada canción toca internet una sola vez. Se limpia la basura de Genius que meten algunos descargadores. Sincronizadas: línea activa con relleno tipo karaoke y el resto se desvanece con la distancia; sin sincronizar: scroll proporcional a la canción.
 - Marquesina para títulos largos, fade-in al cambiar de canción, mini ecualizador en la cola, barra de progreso con resolución de medio carácter.
-- **Efectos ciberpunk** (`f` los activa/desactiva): al cambiar de canción el título, artista y álbum se encienden letra por letra (fantasma neón y luego destello blanco); ráfagas de glitch (desgarro horizontal + celdas cian/magenta) al cambiar de pista y de vez en cuando mientras suena; neón de dos tonos (color de la carátula + su complementario saturado) en espectro y barra de progreso, con cabeza incandescente y pulso de luz; un paquete de luz recorre el borde del panel; el logo brilla con los bajos; barrido de luz sobre la canción actual en la cola; la línea activa de la letra se revela con un borde de luz y el relleno karaoke tiene borde incandescente. Todo corre solo mientras suena (en pausa sigue a 1 fps).
+- **Efectos ciberpunk** (`f` los activa/desactiva): al cambiar de canción el título, artista y álbum se encienden letra por letra (fantasma neón y luego destello blanco); ráfagas de glitch (desgarro horizontal + celdas cian/magenta) al cambiar de pista y de vez en cuando mientras suena; neón de dos tonos (color de la carátula + su complementario saturado) en espectro y barra de progreso, con cabeza incandescente y pulso de luz; el logo brilla con los bajos; barrido de luz sobre la canción actual en la cola; la línea activa de la letra se revela con un borde de luz y el relleno karaoke tiene borde incandescente. Todo corre solo mientras suena (en pausa sigue a 1 fps).
 - **Más color** (con fx): los colores de la carátula se reparten por toda la interfaz. El espectro recorre un degradado entre ellos; cada panel tiene su propio color de borde; artistas, números, duraciones y letras próximas van teñidos; el estado se colorea (sonando / pausa); la letra karaoke y el volumen van en degradado; las teclas del pie alternan los colores.
-- **Reacciona al ritmo**: detector de golpes (flujo espectral de los bajos con umbral adaptativo). Cada golpe ilumina el borde del reproductor, el logo (◈), el espectro y el relleno karaoke, y lanza un pulso que recorre la barra de progreso hacia atrás; los golpes fuertes disparan el glitch (máx. uno cada 3.5 s). La fila de la canción actual en la cola se ilumina con los bajos. Medidor de nivel junto al volumen, con pico que cae.
+- **Reacciona al ritmo**: detector de golpes (flujo espectral de los bajos con umbral adaptativo). Como en Shade, los bordes de todos los paneles se iluminan con cada golpe y crecen a línea gruesa (`┏━┓`) con los bajos fuertes; los golpes más duros sacuden los paneles una columna (máx. uno cada 0.45 s). Cada golpe ilumina también el logo (◈), el espectro y el relleno karaoke, y lanza un pulso que recorre la barra de progreso hacia atrás; los golpes fuertes disparan el glitch (máx. uno cada 3.5 s). La fila de la canción actual en la cola se ilumina con los bajos. Medidor de nivel junto al volumen, con pico que cae.
 - **Visualizador** (`v` cambia): barras, espejo (crece desde el centro, bajos al medio), onda (relleno en braille, 2×4 puntos por celda) y lluvia (katakana estilo Matrix: cada columna cae más rápido y con estela más larga según su banda).
 - Al arrancar, barrido diagonal tipo CRT; el estado (reproduciendo/pausa) se ilumina letra por letra al cambiar; el volumen se desliza al nuevo nivel con destello; el cursor de la cola deja una estela.
 
@@ -52,7 +52,7 @@ Nation puede hacer de skin de otro reproductor sin tocar su audio (el streaming 
 - **Qué se controla**: `espacio`, `n`/`p`, `←`/`→` (seek), `s`, `r`, y `+`/`-`/`m` mueven el volumen de *esa app* en el mezclador de Windows (en todas las salidas). La API para Shade y las teclas multimedia también actúan sobre la app seguida. Cuando Nation sigue a otra app, retira su propia sesión de SMTC para no aparecer duplicado.
 - **Panel de fuentes (`o`)**: lista *Biblioteca local*, *Automático* y cada app con sesión de medios (Spotify, Brave, Chrome…) con su estado y lo que está sonando. `j`/`k` mueven, `enter` la usa: elegir una app la deja **fijada** (◆), así Nation sigue siempre a esa aunque otra suene; *Automático* quita la fijación. `a` activa/desactiva el auto-seguir. Se guarda en `%LOCALAPPDATA%\Nation\sources.json`.
 - **Auto-seguir**: si otra app empieza a reproducir música mientras Nation está en pausa (o pausas Nation mientras otra suena), Nation la sigue sola. Un navegador solo cuenta si reporta álbum (YouTube Music lo hace, un video normal de YouTube no), así que ver videos no secuestra el reproductor (elegido a mano desde el panel sí se sigue). `enter` sobre una canción de la cola vuelve a la biblioteca, y si la otra app se cierra Nation regresa sola. La que queda atrás se pausa para que nunca suenen dos a la vez.
-- **Límites**: el ecualizador solo procesa la música local (mpv); la cola y las playlists de Spotify no se exponen por SMTC, así que el panel izquierdo sigue mostrando la biblioteca local.
+- **Límites**: el ecualizador solo procesa la música local (mpv). La cola y las playlists de Spotify no se exponen por SMTC, así que mientras Nation sigue a otra app la lista lateral y el conteo de pistas se ocultan. Navegar la biblioteca de Spotify requeriría su Web API, que desde febrero de 2026 exige Premium al dueño de la app.
 
 ## Teclas multimedia de Windows
 
@@ -72,25 +72,21 @@ Nation expone en `127.0.0.1:7814` el mismo subconjunto de la API remota de Tauon
 
 ## Controles
 
+El pie solo muestra `? comandos`: **`?`** (o `F1`) abre el menú con todos los comandos agrupados (Reproducción, Vista, Letra, Lista y los del panel abierto), cada uno con su tecla y su estado actual (aleatorio sí/no, visualizador, fuente…). `j`/`k` mueven, `enter` ejecuta, `esc` cierra, y pulsar la tecla de un comando lo ejecuta directo. Todas las teclas funcionan también sin abrir el menú:
+
 | Tecla | Acción |
 |---|---|
 | `espacio` | play / pausa (también la tecla ⏯ del teclado, global) |
 | `n` / `p` | siguiente / anterior (también ⏭ / ⏮, global) |
 | `←` / `→` | seek ±5 s (`shift` ±30 s) |
-| `+` / `-` | volumen |
-| `m` | mute |
-| `s` | aleatorio on/off (la canción actual sigue sonando) |
-| `c` | saltar el cursor a la canción actual |
-| `r` | repetir cola on/off |
+| `+` / `-` · `m` | volumen · mute |
+| `s` · `r` | aleatorio (la canción actual sigue sonando) · repetir |
 | `o` | panel de fuentes: biblioteca local, automático o una app fija (Spotify, YouTube Music…) |
-| `l` | mostrar / ocultar letra |
-| `f` | efectos ciberpunk on/off |
-| `e` | ecualizador |
-| `v` | cambiar visualizador (barras / espejo / onda / lluvia) |
+| `b` | mostrar / ocultar la lista de canciones (se recuerda en `%LOCALAPPDATA%\Nation\ui.json`) |
+| `l` · `e` · `v` · `f` | letra · ecualizador · visualizador · efectos |
 | `,` / `.` | desfase de letra −/+ 0.25 s |
-| `j` / `k`, `↑` / `↓` | mover cursor en la cola |
-| `g` / `G` | inicio / final |
-| `enter` | reproducir selección |
+| `j`/`k`, `↑`/`↓`, `g`/`G`, `enter`, `c` | lista: mover, inicio/final, reproducir, ir a la actual |
+| `?` | menú de comandos |
 | `q` | salir |
 
 ## Roadmap

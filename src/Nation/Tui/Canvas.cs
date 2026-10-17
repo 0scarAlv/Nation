@@ -144,23 +144,24 @@ public sealed class Canvas
             _cells[y * Width + i].Bg = packed;
     }
 
-    /// <summary>Rounded lazygit-style panel with the title embedded in the top border.</summary>
-    public void Box(int x, int y, int w, int h, string title, Rgb border, Rgb titleColor)
+    /// <summary>Rounded lazygit-style panel with the title embedded in the top border; heavy = thick square frame.</summary>
+    public void Box(int x, int y, int w, int h, string title, Rgb border, Rgb titleColor, bool heavy = false)
     {
         if (w < 2 || h < 2) return;
-        Set(x, y, '╭', border);
-        Set(x + w - 1, y, '╮', border);
-        Set(x, y + h - 1, '╰', border);
-        Set(x + w - 1, y + h - 1, '╯', border);
+        Set(x, y, heavy ? '┏' : '╭', border);
+        Set(x + w - 1, y, heavy ? '┓' : '╮', border);
+        Set(x, y + h - 1, heavy ? '┗' : '╰', border);
+        Set(x + w - 1, y + h - 1, heavy ? '┛' : '╯', border);
+        char horizontal = heavy ? '━' : '─', vertical = heavy ? '┃' : '│';
         for (int i = 1; i < w - 1; i++)
         {
-            Set(x + i, y, '─', border);
-            Set(x + i, y + h - 1, '─', border);
+            Set(x + i, y, horizontal, border);
+            Set(x + i, y + h - 1, horizontal, border);
         }
         for (int j = 1; j < h - 1; j++)
         {
-            Set(x, y + j, '│', border);
-            Set(x + w - 1, y + j, '│', border);
+            Set(x, y + j, vertical, border);
+            Set(x + w - 1, y + j, vertical, border);
         }
         if (title.Length > 0 && w > 6)
         {

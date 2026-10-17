@@ -33,6 +33,21 @@ public sealed class App
     private bool _sourcesOpen;
     private int _sourceRow;
 
+    /// <summary>Layout preferences (library sidebar on/off); saved on every change.</summary>
+    public UiSettings Ui { get; set; } = new();
+    /// <summary>The library sidebar: hidden at will, and always while following another app (it has no local queue).</summary>
+    private bool QueueVisible => !_externalMode && Ui.ShowQueue;
+
+    // Command menu (`?`): every action in one place instead of a footer full of hints.
+    private bool _menuOpen;
+    private int _menuRow;
+    private bool _quit;
+
+    // Bass-reactive borders: they thicken with the bass and the panels jolt on hard hits.
+    private double _lastShakeAt = double.NegativeInfinity;
+    private int _shakeDir = 1;
+    private const double ShakeTime = 0.07;
+
     // Skin mode (`o`): the player panel, lyrics and transport keys follow another app.
     // The queue, equalizer and saved session always stay on Nation's own library.
     private bool _externalMode;
@@ -167,6 +182,12 @@ public sealed class App
     {
         var queue = _player.Queue;
         bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
+        if (_menuOpen)
+        {
+            if (HandleMenuKey(key, out bool handled) is false) return false;
+            if (handled) return true;
+        }
+        if (key.KeyChar == '?' || key.Key == ConsoleKey.F1) { OpenMenu(); return true; }
         // Offset keys by character so they work on both US and Spanish layouts.
         if (_sourcesOpen && HandleSourcesKey(key)) return true;
         if (_eqOpen && HandleEqKey(key, shift)) return true;
@@ -185,6 +206,7 @@ public sealed class App
             case ConsoleKey.P: Playback.Previous(); break;
             case ConsoleKey.S: Playback.ToggleShuffle(); JumpToCurrent(); break;
             case ConsoleKey.C: JumpToCurrent(); break;
+            case ConsoleKey.B: ToggleSidebar(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
             case ConsoleKey.E: _eqOpen = true; _sourcesOpen = false; break;
@@ -198,15 +220,16 @@ public sealed class App
             case ConsoleKey.M: Playback.ToggleMute(); break;
             case ConsoleKey.OemPlus or ConsoleKey.Add: Playback.AddVolume(5); break;
             case ConsoleKey.OemMinus or ConsoleKey.Subtract: Playback.AddVolume(-5); break;
-            case ConsoleKey.J or ConsoleKey.DownArrow: MoveCursor(1); break;
-            case ConsoleKey.K or ConsoleKey.UpArrow: MoveCursor(-1); break;
-            case ConsoleKey.PageDown: MoveCursor(10); break;
-            case ConsoleKey.PageUp: MoveCursor(-10); break;
-            case ConsoleKey.G when shift: MoveCursor(queue.Count); break;
-            case ConsoleKey.G or ConsoleKey.Home: MoveCursor(-queue.Count); break;
-            case ConsoleKey.End: MoveCursor(queue.Count); break;
+            // Queue navigation only while the sidebar is on screen.
+            case ConsoleKey.J or ConsoleKey.DownArrow when QueueVisible: MoveCursor(1); break;
+            case ConsoleKey.K or ConsoleKey.UpArrow when QueueVisible: MoveCursor(-1); break;
+            case ConsoleKey.PageDown when QueueVisible: MoveCursor(10); break;
+            case ConsoleKey.PageUp when QueueVisible: MoveCursor(-10); break;
+            case ConsoleKey.G when shift && QueueVisible: MoveCursor(queue.Count); break;
+            case ConsoleKey.G or ConsoleKey.Home when QueueVisible: MoveCursor(-queue.Count); break;
+            case ConsoleKey.End when QueueVisible: MoveCursor(queue.Count); break;
             case ConsoleKey.O: OpenSources(); break;
-            case ConsoleKey.Enter:
+            case ConsoleKey.Enter when QueueVisible:
                 // Picking a song from the library brings Nation back to its own player.
                 SetSource(external: false);
                 _player.PlayIndex(_cursor);
@@ -284,6 +307,17 @@ public sealed class App
             SetSource(external: false, notice: "la otra app se cerró");
         _extWasPlaying = extPlaying;
         _localWasPlaying = localPlaying;
+    }
+
+    private void ToggleSidebar()
+    {
+        if (_externalMode)
+        {
+            Notice($"{External?.AppName} no tiene lista local; vuelve a la biblioteca con o");
+            return;
+        }
+        Ui = Ui with { ShowQueue = !Ui.ShowQueue };
+        Ui.Save();
     }
 
     private void OpenSources()
@@ -453,8 +487,8 @@ public sealed class App
 
         DrawHeader(c);
         int bodyTop = 1, bodyHeight = c.Height - 2;
-        int leftWidth = c.Width < 70 ? c.Width / 2 : Math.Clamp(c.Width * 42 / 100, 30, 64);
-        DrawQueue(c, 0, bodyTop, leftWidth, bodyHeight, current);
+        int leftWidth = !QueueVisible ? 0 : c.Width < 70 ? c.Width / 2 : Math.Clamp(c.Width * 42 / 100, 30, 64);
+        if (QueueVisible) DrawQueue(c, 0, bodyTop, leftWidth, bodyHeight, current);
 
         // Right column: player on top, lyrics below; on short terminals lyrics take it all.
         int rx = leftWidth, rw = c.Width - leftWidth;
@@ -471,7 +505,14 @@ public sealed class App
         }
         else
             DrawLower(c, rx, bodyTop, rw, bodyHeight, dt);
+        // Hard bass hits jolt the panels one column, alternating sides.
+        if (_fx && now - _lastShakeAt < ShakeTime)
+        {
+            _animFast = true;
+            for (int row = bodyTop; row < bodyTop + bodyHeight; row++) c.ShiftRow(0, row, c.Width, _shakeDir);
+        }
         DrawFooter(c);
+        if (_menuOpen) DrawMenu(c);
         if (_fx && now < BootTime) DrawBoot(c, now / BootTime);
         PublishRemote();
         // While following another app, Nation's own media session steps aside (it would show a paused duplicate).
@@ -577,6 +618,11 @@ public sealed class App
                 _lastBeatAt = now;
                 _beat = Math.Max(_beat, strength);
                 if (_ripples.Count < 4) _ripples.Add(now);
+                if (_fx && strength > 0.7 && now - _lastShakeAt > 0.45)
+                {
+                    _lastShakeAt = now;
+                    _shakeDir = -_shakeDir;
+                }
                 // Hard hits glitch the metadata, with a cooldown so it never turns into strobe.
                 if (_fx && strength > 0.65 && now - _lastBeatGlitch > 3.5)
                 {
@@ -663,7 +709,7 @@ public sealed class App
         if (Playback.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
         if (Playback.Repeat) c.Text(x, 0, "⟳ repetir", _fx ? _third : Accent);
 
-        string count = $"{_player.Queue.Count} pistas";
+        string count = _externalMode ? "" : $"{_player.Queue.Count} pistas";
         int right = c.Width - count.Length - 1;
         c.Text(right, 0, count, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted);
 
@@ -703,7 +749,7 @@ public sealed class App
     private void DrawQueue(Canvas c, int x, int y, int w, int h, int current)
     {
         var queue = _player.Queue;
-        c.Box(x, y, w, h, _player.Shuffled ? "Cola ⤮" : "Cola", Accent, Accent);
+        Panel(c, x, y, w, h, _player.Shuffled ? "Cola ⤮" : "Cola", Accent, Accent);
 
         int rows = h - 2, inner = w - 2;
         if (rows <= 0) return;
@@ -778,8 +824,7 @@ public sealed class App
             : _externalMode ? $"Reproduciendo · {External?.AppName}" : "Reproduciendo";
         notice |= sourceNotice;
         var border = _fx ? Rgb.Lerp(BorderIn(_second), _second, BeatStep * 0.8) : PanelBorder;
-        c.Box(x, y, w, h, title, border, notice ? Accent : Muted);
-        if (_fx && Playback.Playing) DrawBorderRunner(c, x, y, w, h);
+        Panel(c, x, y, w, h, title, border, notice ? Accent : Muted);
         int ix = x + 3, iw = w - 6;
         var t = Playback.Current;
         if (t is null)
@@ -861,25 +906,16 @@ public sealed class App
     private Rgb PanelBorder => _fx ? Rgb.Lerp(Theme.Border, Accent, 0.3) : Theme.Border;
     private Rgb BorderIn(Rgb hue) => _fx ? Rgb.Lerp(Theme.Border, hue, 0.4) : Theme.Border;
 
-    /// <summary>A bright packet with a fading tail that circles the panel border.</summary>
-    private void DrawBorderRunner(Canvas c, int x, int y, int w, int h)
+    /// <summary>
+    /// Panel frame; with fx and music playing it reacts to the bass like Shade's
+    /// display border: brighter with each beat, and thick (it "grows") on strong bass.
+    /// </summary>
+    private void Panel(Canvas c, int x, int y, int w, int h, string title, Rgb border, Rgb titleColor)
     {
-        int perimeter = 2 * (w - 1) + 2 * (h - 1);
-        if (perimeter <= 0) return;
-        const double lap = 4.0; // seconds per loop
-        const int tail = 12;
-        int head = (int)(Now % lap / lap * perimeter);
-        for (int k = 0; k < tail; k++)
-        {
-            int p = ((head - k) % perimeter + perimeter) % perimeter;
-            var (cx, cy) =
-                p < w - 1 ? (x + p, y) :
-                p < w - 1 + h - 1 ? (x + w - 1, y + p - (w - 1)) :
-                p < 2 * (w - 1) + h - 1 ? (x + w - 1 - (p - (w - 1 + h - 1)), y + h - 1) :
-                (x, y + h - 1 - (p - (2 * (w - 1) + h - 1)));
-            double t = 1 - k / (double)tail;
-            c.Recolor(cx, cy, k == 0 ? Fx.White : Rgb.Lerp(PanelBorder, _second, t * t));
-        }
+        bool live = _fx && Playback.Playing;
+        double level = live ? Math.Max(BeatStep, BassStep * 0.85) : 0;
+        if (level > 0) border = Rgb.Lerp(border, Fx.White, level * 0.35);
+        c.Box(x, y, w, h, title, border, titleColor, heavy: level >= 0.5);
     }
 
     /// <summary>
@@ -937,6 +973,139 @@ public sealed class App
         else DrawLyrics(c, x, y, w, h, dt);
     }
 
+    // ── command menu ───────────────────────────────────────────────────
+
+    private sealed record MenuItem(string Section, string Key, string Label, Action Run, string? State = null);
+
+    private void OpenMenu()
+    {
+        _menuOpen = true;
+        _menuRow = 0;
+    }
+
+    private static string YesNo(bool on) => on ? "sí" : "no";
+
+    /// <summary>Every command, grouped; the open panel's own keys come first.</summary>
+    private List<MenuItem> MenuItems()
+    {
+        var p = Playback;
+        var items = new List<MenuItem>();
+        int bands = Equalizer.Frequencies.Length;
+        if (_eqOpen)
+        {
+            items.Add(new("Ecualizador", "← →", "banda anterior / siguiente", () => _eqBand = (_eqBand + 1) % bands, $"{Equalizer.Labels[_eqBand]} Hz"));
+            items.Add(new("Ecualizador", "↑ ↓", "ganancia ±1 dB (shift ±3)", () => ChangeEq(() => _eq.SetGain(_eqBand, _eq.Gains[_eqBand] + 1)), $"{_eq.Gains[_eqBand]:+0;-0;0} dB"));
+            items.Add(new("Ecualizador", "0", "banda plana", () => ChangeEq(() => _eq.SetGain(_eqBand, 0))));
+            items.Add(new("Ecualizador", "tab", "siguiente preset", () => ChangeEq(() => _eq.CyclePreset(1)), _eq.PresetName));
+            items.Add(new("Ecualizador", "b", "ecualizador on/off", () => ChangeEq(_eq.ToggleEnabled), YesNo(_eq.Enabled)));
+            items.Add(new("Ecualizador", "esc", "cerrar ecualizador", () => _eqOpen = false));
+        }
+        if (_sourcesOpen)
+        {
+            items.Add(new("Fuentes", "j k", "mover · enter usar la fuente", () => { }));
+            items.Add(new("Fuentes", "a", "auto-seguir otras apps", () => { Sources = Sources with { AutoFollow = !Sources.AutoFollow }; Sources.Save(); }, YesNo(Sources.AutoFollow)));
+            items.Add(new("Fuentes", "esc", "cerrar fuentes", () => _sourcesOpen = false));
+        }
+
+        items.Add(new("Reproducción", "espacio", "play / pausa", p.TogglePause, p.Playing ? "sonando" : "pausa"));
+        items.Add(new("Reproducción", "n", "siguiente", p.Next));
+        items.Add(new("Reproducción", "p", "anterior", p.Previous));
+        items.Add(new("Reproducción", "→", "adelantar 5 s (shift 30 s)", () => p.SeekRelative(5)));
+        items.Add(new("Reproducción", "←", "retroceder 5 s (shift 30 s)", () => p.SeekRelative(-5)));
+        items.Add(new("Reproducción", "+", "subir volumen", () => p.AddVolume(5), double.IsNaN(p.Volume) ? null : $"{p.Volume:0}"));
+        items.Add(new("Reproducción", "-", "bajar volumen", () => p.AddVolume(-5)));
+        items.Add(new("Reproducción", "m", "silenciar", p.ToggleMute, YesNo(p.Muted)));
+        items.Add(new("Reproducción", "s", "aleatorio", () => { p.ToggleShuffle(); JumpToCurrent(); }, YesNo(p.Shuffled)));
+        items.Add(new("Reproducción", "r", "repetir", p.ToggleRepeat, YesNo(p.Repeat)));
+
+        items.Add(new("Vista", "o", "fuentes: biblioteca, Spotify, navegador…", OpenSources, _externalMode ? External?.AppName : "biblioteca"));
+        if (!_externalMode) items.Add(new("Vista", "b", "lista de canciones (barra lateral)", ToggleSidebar, Ui.ShowQueue ? "visible" : "oculta"));
+        items.Add(new("Vista", "l", "letra", () => _showLyrics = !_showLyrics, YesNo(_showLyrics)));
+        if (!_externalMode) items.Add(new("Vista", "e", "ecualizador", () => { _eqOpen = true; _sourcesOpen = false; }));
+        items.Add(new("Vista", "v", "visualizador", () => { _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length); _visualChangedAt = Now; }, _visual.ToString().ToLowerInvariant()));
+        items.Add(new("Vista", "f", "efectos", () => _fx = !_fx, YesNo(_fx)));
+
+        items.Add(new("Letra", ",", "desfase −0.25 s", () => NudgeLyrics(-0.25)));
+        items.Add(new("Letra", ".", "desfase +0.25 s", () => NudgeLyrics(+0.25)));
+
+        if (QueueVisible)
+        {
+            items.Add(new("Lista", "j k", "mover · g/G inicio/final · enter reproducir", () => { }));
+            items.Add(new("Lista", "c", "ir a la canción actual", JumpToCurrent));
+        }
+        items.Add(new("General", "q", "salir", () => _quit = true));
+        return items;
+    }
+
+    /// <summary>Navigation inside the menu. Any other key closes it and runs as a normal shortcut (handled = false).</summary>
+    private bool HandleMenuKey(ConsoleKeyInfo key, out bool handled)
+    {
+        handled = true;
+        var items = MenuItems();
+        switch (key.Key)
+        {
+            case ConsoleKey.Escape: _menuOpen = false; return true;
+            case ConsoleKey.J or ConsoleKey.DownArrow: _menuRow = (_menuRow + 1) % items.Count; return true;
+            case ConsoleKey.K or ConsoleKey.UpArrow: _menuRow = (_menuRow - 1 + items.Count) % items.Count; return true;
+            case ConsoleKey.Enter:
+                _menuOpen = false;
+                items[Math.Clamp(_menuRow, 0, items.Count - 1)].Run();
+                return !_quit;
+        }
+        if (key.KeyChar == '?' || key.Key == ConsoleKey.F1) { _menuOpen = false; return true; }
+        _menuOpen = false;
+        handled = false;
+        return true;
+    }
+
+    /// <summary>Centered overlay listing every command with its key and current state.</summary>
+    private void DrawMenu(Canvas c)
+    {
+        var items = MenuItems();
+        _menuRow = Math.Clamp(_menuRow, 0, items.Count - 1);
+        // One line per item plus a header line per section.
+        var lines = new List<(string? Section, int Item)>();
+        string? section = null;
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (items[i].Section != section) { section = items[i].Section; lines.Add((section, -1)); }
+            lines.Add((null, i));
+        }
+
+        int w = Math.Min(c.Width - 4, 62), h = Math.Min(c.Height - 2, lines.Count + 4);
+        int x = (c.Width - w) / 2, y = Math.Max(1, (c.Height - h) / 2);
+        var bg = Rgb.Lerp(_palette.Backdrop, Rgb.Hex(0x0A0A0C), 0.55);
+        for (int row = y; row < y + h; row++)
+            for (int col = x; col < x + w; col++) c.Set(col, row, ' ', null, bg);
+        c.Box(x, y, w, h, "Comandos", _fx ? Rgb.Lerp(Accent, Fx.White, 0.2) : Accent, Accent);
+
+        int rows = h - 4, top = y + 1;
+        int selLine = lines.FindIndex(l => l.Item == _menuRow);
+        int scroll = Math.Clamp(selLine - rows / 2, 0, Math.Max(0, lines.Count - rows));
+        var selection = Rgb.Lerp(bg, Theme.Selection, 0.8);
+        for (int r = 0; r < rows && scroll + r < lines.Count; r++)
+        {
+            var (head, index) = lines[scroll + r];
+            int ry = top + r;
+            if (head is not null)
+            {
+                c.Text(x + 2, ry, head, _fx ? _third : Muted, bg, bold: true);
+                continue;
+            }
+            var item = items[index];
+            bool selected = index == _menuRow;
+            var rowBg = selected ? selection : bg;
+            if (selected) for (int col = x + 1; col < x + w - 1; col++) c.Set(col, ry, ' ', null, rowBg);
+            if (selected) c.Set(x + 1, ry, '▌', _second, rowBg);
+            c.Text(x + 4, ry, item.Key, selected ? Fx.White : Accent, rowBg, bold: true, maxWidth: 9);
+            int stateW = item.State is { } st ? TextWidth.Of(st) : 0;
+            c.Text(x + 14, ry, item.Label, selected ? Theme.Text : Rgb.Lerp(Theme.Text, Muted, 0.35), rowBg, maxWidth: w - 16 - (stateW > 0 ? stateW + 2 : 0));
+            if (item.State is { } state) c.Text(x + w - 2 - stateW, ry, state, _second, rowBg);
+        }
+        string help = "j/k mover · enter ejecutar · esc cerrar · o pulsa su tecla";
+        c.Text(x + 2, y + h - 2, help, Muted, bg, maxWidth: w - 4);
+    }
+
     // ── sources ────────────────────────────────────────────────────────
 
     private double _sourcesListedAt = double.NegativeInfinity;
@@ -947,7 +1116,7 @@ public sealed class App
         // Titles and statuses change under us; re-list about once a second while open.
         if (Now - _sourcesListedAt > 1) { _sourcesListedAt = Now; External?.RefreshSessions(); }
         string title = $"Fuentes · auto-seguir: {(Sources.AutoFollow ? "sí" : "no")}";
-        c.Box(x, y, w, h, title, BorderIn(_second), Accent);
+        Panel(c, x, y, w, h, title, BorderIn(_second), Accent);
         int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
         if (rows <= 0 || iw <= 10) return;
 
@@ -1002,7 +1171,7 @@ public sealed class App
         if (_player.EqualizerError is { } err) title += $" · error: {err}";
         if (_externalMode) title += $" · solo música local, no {External?.AppName}";
         var border = _fx ? Rgb.Lerp(BorderIn(_third), _second, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
-        c.Box(x, y, w, h, title, border, on ? Accent : Muted);
+        Panel(c, x, y, w, h, title, border, on ? Accent : Muted);
 
         int bands = Equalizer.Frequencies.Length;
         int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
@@ -1158,7 +1327,7 @@ public sealed class App
             title += $" · desfase {_lyricOffset:+0.00;-0.00;0.00}s";
         else if (sheet is not null && !sheet.Synced && recentNudge)
             title += " · desfase no aplica";
-        c.Box(x, y, w, h, title, BorderIn(_third), Muted);
+        Panel(c, x, y, w, h, title, BorderIn(_third), Muted);
 
         int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
         if (rows <= 0 || iw <= 4) return;
@@ -1512,38 +1681,17 @@ public sealed class App
         }
     }
 
-    private static readonly (string Key, string Label)[] EqHints =
-    {
-        ("←/→", "banda"), ("↑/↓", "ganancia"), ("shift", "±3 dB"), ("0", "plano"), ("tab", "preset"), ("b", "on/off"),
-        ("e", "cerrar"), ("espacio", "play"), ("n/p", "sig/ant"),
-    };
-
-    private static readonly (string Key, string Label)[] SourceHints =
-    {
-        ("j/k", "mover"), ("enter", "usar"), ("a", "auto-seguir"), ("o", "cerrar"), ("espacio", "play"), ("n/p", "sig/ant"),
-    };
-
-    private static readonly (string Key, string Label)[] Hints =
-    {
-        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("o", "fuentes"), ("l", "letra"), ("e", "ecualizador"), ("f", "fx"), ("v", "visual"),
-        ("+/-", "vol"), ("m", "mute"), ("enter", "reproducir"), (",/.", "desfase"), ("c", "actual"), ("j/k", "mover"),
-    };
-
     private void DrawFooter(Canvas c)
     {
         int x = 1, y = c.Height - 1;
-        // Quit hint is pinned to the right so it never gets cut off.
+        // Everything lives in the command menu; the footer only says how to open it.
+        x += c.Text(x, y, "?", Accent, bold: true) + 1;
+        x += c.Text(x, y, "comandos", Muted) + 3;
+        string? context = _menuOpen ? null : _eqOpen ? "esc cierra el ecualizador" : _sourcesOpen ? "esc cierra fuentes" : null;
+        if (context is not null) c.Text(x, y, context, _fx ? Rgb.Lerp(Muted, _third, 0.4) : Muted);
         int quitX = c.Width - "q salir".Length - 1;
         c.Text(quitX, y, "q", Accent);
         c.Text(quitX + 2, y, "salir", Muted);
-        int hint = 0;
-        foreach (var (key, label) in _sourcesOpen ? SourceHints : _eqOpen ? EqHints : Hints)
-        {
-            if (x + key.Length + label.Length + 3 > quitX) break;
-            var keyColor = !_fx ? Accent : (hint++ % 3) switch { 0 => Accent, 1 => _second, _ => _third };
-            x += c.Text(x, y, key, keyColor) + 1;
-            x += c.Text(x, y, label, Muted) + 2;
-        }
     }
 
     private static string FormatTime(double seconds)

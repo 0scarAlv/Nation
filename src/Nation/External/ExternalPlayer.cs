@@ -50,6 +50,68 @@ public sealed class ExternalPlayer : IPlayback, IDisposable
     public AutoResetEvent Wake { get; } = new(false);
     public string? Error { get; private set; }
 
+    /// <summary>App always followed while it has a session (sources panel); null = pick automatically.</summary>
+    public string? PinnedAppId { get; private set; }
+
+    public void Pin(string? appId)
+    {
+        lock (_lock)
+        {
+            PinnedAppId = appId;
+            AttachBest();
+        }
+    }
+
+    /// <summary>One row of the sources panel.</summary>
+    public sealed record SessionInfo(string AppId, string AppName, string Status, bool Playing, string Title, string Artist);
+
+    private volatile IReadOnlyList<SessionInfo> _sessions = Array.Empty<SessionInfo>();
+    private int _listing;
+
+    /// <summary>Last list from RefreshSessions (other apps only).</summary>
+    public IReadOnlyList<SessionInfo> Sessions => _sessions;
+
+    /// <summary>Re-reads every session's app/status/title in the background; Wake fires when done.</summary>
+    public void RefreshSessions()
+    {
+        var manager = _manager;
+        if (manager is null || Interlocked.Exchange(ref _listing, 1) == 1) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var list = new List<SessionInfo>();
+                foreach (var s in manager.GetSessions())
+                {
+                    if (IsOwn(s)) continue;
+                    string id = s.SourceAppUserModelId ?? "";
+                    var status = GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
+                    try { status = s.GetPlaybackInfo().PlaybackStatus; } catch (Exception) { }
+                    string title = "", artist = "";
+                    try { var p = await s.TryGetMediaPropertiesAsync(); title = Clean(p.Title); artist = Clean(p.Artist); } catch (Exception) { }
+                    string label = status switch
+                    {
+                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing => "sonando",
+                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused => "pausa",
+                        _ => "detenido",
+                    };
+                    list.Add(new SessionInfo(id, FriendlyAppName(id), label,
+                        status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing, title, artist));
+                }
+                _sessions = list;
+            }
+            catch (Exception ex) { Error = ex.Message; }
+            finally
+            {
+                Volatile.Write(ref _listing, 0);
+                Wake.Set();
+            }
+        });
+    }
+
+    /// <summary>App id of the session being followed right now.</summary>
+    public string? CurrentAppId => _shown.Session?.SourceAppUserModelId;
+
     private ExternalPlayer()
     {
         // Nation publishes its own media session; never follow ourselves.
@@ -57,11 +119,11 @@ public sealed class ExternalPlayer : IPlayback, IDisposable
     }
 
     /// <summary>Starts watching in the background (startup is not delayed); null on systems without SMTC.</summary>
-    public static ExternalPlayer? TryStart()
+    public static ExternalPlayer? TryStart(string? pinnedAppId = null)
     {
         try
         {
-            var player = new ExternalPlayer();
+            var player = new ExternalPlayer { PinnedAppId = pinnedAppId };
             _ = player.InitAsync();
             return player;
         }
@@ -141,6 +203,9 @@ public sealed class ExternalPlayer : IPlayback, IDisposable
     {
         if (_manager is null) return null;
         var sessions = _manager.GetSessions().Where(s => !IsOwn(s)).ToList();
+        // A pinned app wins whenever it's open, playing or not.
+        if (PinnedAppId is { } pin && sessions.FirstOrDefault(s => s.SourceAppUserModelId == pin) is { } pinned)
+            return pinned;
         if (_session is not null && sessions.Any(s => s.SourceAppUserModelId == _session.SourceAppUserModelId) && IsPlaying(_session))
             return _session;
         var playing = sessions.Where(IsPlaying).ToList();

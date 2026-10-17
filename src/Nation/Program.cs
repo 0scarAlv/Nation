@@ -5,16 +5,17 @@ using Nation.Lyrics;
 using Nation.Remote;
 using Nation.Tui;
 
-// Usage: nation [files|folders...] [--shuffle] [--volume <0-100>] [--offline] [--no-api] [--api-port <n>] [--no-media-keys] [--skin] [--no-external] [--sessions] [--snapshot <file> [--external]]
+// Usage: nation [files|folders...] [--shuffle] [--volume <0-100>] [--offline] [--no-api] [--api-port <n>] [--no-media-keys] [--skin] [--no-external] [--sessions] [--snapshot <file> [--external] [--snapshot-keys <keys>]]
 // With no paths, plays the user's Music folder.
 var paths = new List<string>();
-string? snapshotPath = null;
+string? snapshotPath = null, snapshotKeys = null;
 bool shuffle = false, offline = false, api = true, smtc = true, external = true, externalSnapshot = false, skin = false;
 int apiPort = TauonCompatServer.DefaultPort;
 int? volume = null;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--snapshot" && i + 1 < args.Length) snapshotPath = args[++i];
+    else if (args[i] == "--snapshot-keys" && i + 1 < args.Length) snapshotKeys = args[++i];
     else if (args[i] == "--shuffle") shuffle = true;
     else if (args[i] == "--offline") offline = true;
     else if (args[i] == "--no-api") api = false;
@@ -56,9 +57,10 @@ remote?.Start();
 // Windows media session: keyboard media keys + volume flyout (snapshots stay out of it).
 using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null;
 // Other apps' sessions, so Nation can skin Spotify/YouTube Music (snapshots only with --external).
-using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart() : null;
+var sources = SourceSettings.Load();
+using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, PersistSession = snapshotPath is null };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, Sources = sources, PersistSession = snapshotPath is null };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;
@@ -73,8 +75,18 @@ if (snapshotPath is not null)
     // Muted so a snapshot never talks over whatever is already playing.
     player.ToggleMute();
     var canvas = new Canvas(110, 28);
+    var keysAt = DateTime.UtcNow.AddSeconds(1.5);
     for (var until = DateTime.UtcNow.AddSeconds(3); DateTime.UtcNow < until; Thread.Sleep(frame))
     {
+        // --snapshot-keys: press one key every 0.25 s once sessions had time to load (letters, '>' = enter).
+        if (snapshotKeys is { Length: > 0 } && DateTime.UtcNow >= keysAt)
+        {
+            char k = snapshotKeys[0];
+            app.HandleKey(k == '>' ? new ConsoleKeyInfo((char)13, ConsoleKey.Enter, false, false, false)
+                : new ConsoleKeyInfo(k, (ConsoleKey)char.ToUpperInvariant(k), false, false, false));
+            snapshotKeys = snapshotKeys[1..];
+            keysAt = DateTime.UtcNow.AddSeconds(0.25);
+        }
         canvas.Clear();
         app.Draw(canvas);
     }

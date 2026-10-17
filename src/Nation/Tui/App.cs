@@ -26,6 +26,12 @@ public sealed class App
     public ExternalPlayer? External { get; init; }
     /// <summary>--skin: follow another app from the start, even if it's paused.</summary>
     public bool StartAsSkin { get; init; }
+    /// <summary>Sources panel settings (auto-follow, pinned app); saved on every change.</summary>
+    public SourceSettings Sources { get; set; } = new();
+
+    // Sources panel (`o`): takes the lyrics' place, like the equalizer.
+    private bool _sourcesOpen;
+    private int _sourceRow;
 
     // Skin mode (`o`): the player panel, lyrics and transport keys follow another app.
     // The queue, equalizer and saved session always stay on Nation's own library.
@@ -162,6 +168,7 @@ public sealed class App
         var queue = _player.Queue;
         bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
         // Offset keys by character so they work on both US and Spanish layouts.
+        if (_sourcesOpen && HandleSourcesKey(key)) return true;
         if (_eqOpen && HandleEqKey(key, shift)) return true;
         switch (key.KeyChar)
         {
@@ -180,7 +187,7 @@ public sealed class App
             case ConsoleKey.C: JumpToCurrent(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
-            case ConsoleKey.E: _eqOpen = true; break;
+            case ConsoleKey.E: _eqOpen = true; _sourcesOpen = false; break;
             case ConsoleKey.V:
                 _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length);
                 _visualChangedAt = Now;
@@ -198,7 +205,7 @@ public sealed class App
             case ConsoleKey.G when shift: MoveCursor(queue.Count); break;
             case ConsoleKey.G or ConsoleKey.Home: MoveCursor(-queue.Count); break;
             case ConsoleKey.End: MoveCursor(queue.Count); break;
-            case ConsoleKey.O: ToggleSource(); break;
+            case ConsoleKey.O: OpenSources(); break;
             case ConsoleKey.Enter:
                 // Picking a song from the library brings Nation back to its own player.
                 SetSource(external: false);
@@ -271,7 +278,7 @@ public sealed class App
             SetSource(external: true);
         }
         bool extPlaying = ext.Playing && ext.LooksLikeMusic, localPlaying = _player.Playing;
-        if (!_externalMode && extPlaying && !localPlaying && (!_extWasPlaying || _localWasPlaying))
+        if (Sources.AutoFollow && !_externalMode && extPlaying && !localPlaying && (!_extWasPlaying || _localWasPlaying))
             SetSource(external: true);
         else if (_externalMode && !ext.HasSession)
             SetSource(external: false, notice: "la otra app se cerró");
@@ -279,15 +286,94 @@ public sealed class App
         _localWasPlaying = localPlaying;
     }
 
-    private void ToggleSource()
+    private void OpenSources()
     {
-        if (!_externalMode && External is not { HasSession: true })
+        _sourcesOpen = true;
+        _eqOpen = false;
+        External?.RefreshSessions();
+        // Start on whatever is being followed now.
+        int active = SourceRows().FindIndex(r => r.Active);
+        _sourceRow = Math.Max(0, active);
+    }
+
+    private enum SourceKind { Local, Auto, App }
+
+    private sealed record SourceRow(SourceKind Kind, string Name, string Detail, string Status, bool Active, bool Pinned, string? AppId);
+
+    /// <summary>Library, automatic, then one row per other app's media session.</summary>
+    private List<SourceRow> SourceRows()
+    {
+        var ext = External;
+        bool auto = _externalMode && ext?.PinnedAppId is null;
+        var rows = new List<SourceRow>
         {
-            _sourceNotice = "ninguna otra app está reproduciendo";
-            _sourceChangedAt = Now;
-            return;
+            new(SourceKind.Local, "Biblioteca local", $"{_player.Queue.Count} pistas", "", !_externalMode, false, null),
+            new(SourceKind.Auto, "Automático", "la que esté sonando (prefiere apps de música)", "", auto, false, null),
+        };
+        if (ext is null) return rows;
+        var sessions = ext.Sessions.ToList();
+        // A pinned app that isn't open right now still gets a row, so it can be unpinned.
+        if (ext.PinnedAppId is { } pin && sessions.All(si => si.AppId != pin))
+            sessions.Add(new ExternalPlayer.SessionInfo(pin, Sources.PinnedName ?? pin, "cerrada", false, "", ""));
+        foreach (var si in sessions)
+        {
+            string detail = si.Title.Length == 0 ? "" : si.Artist.Length == 0 ? si.Title : $"{si.Title} · {si.Artist}";
+            bool active = _externalMode && ext.PinnedAppId is not null && ext.CurrentAppId == si.AppId;
+            rows.Add(new(SourceKind.App, si.AppName, detail, si.Status, active, ext.PinnedAppId == si.AppId, si.AppId));
         }
-        SetSource(!_externalMode);
+        return rows;
+    }
+
+    private bool HandleSourcesKey(ConsoleKeyInfo key)
+    {
+        var rows = SourceRows();
+        switch (key.Key)
+        {
+            case ConsoleKey.O or ConsoleKey.Escape: _sourcesOpen = false; return true;
+            case ConsoleKey.J or ConsoleKey.DownArrow: _sourceRow = Math.Min(rows.Count - 1, _sourceRow + 1); return true;
+            case ConsoleKey.K or ConsoleKey.UpArrow: _sourceRow = Math.Max(0, _sourceRow - 1); return true;
+            case ConsoleKey.A:
+                Sources = Sources with { AutoFollow = !Sources.AutoFollow };
+                Sources.Save();
+                return true;
+            case ConsoleKey.Enter:
+                ChooseSource(rows[Math.Clamp(_sourceRow, 0, rows.Count - 1)]);
+                return true;
+        }
+        return false;
+    }
+
+    private void ChooseSource(SourceRow row)
+    {
+        var ext = External;
+        switch (row.Kind)
+        {
+            case SourceKind.Local:
+                SetSource(external: false);
+                return;
+            case SourceKind.Auto:
+                if (ext is null) return;
+                ext.Pin(null);
+                Sources = Sources with { PinnedAppId = null, PinnedName = null };
+                Sources.Save();
+                if (ext.Sessions.Count == 0) { Notice("ninguna otra app tiene sesión de medios"); return; }
+                if (!_externalMode) SetSource(external: true, notice: "automático");
+                else Notice("automático");
+                return;
+            case SourceKind.App when ext is not null:
+                ext.Pin(row.AppId);
+                Sources = Sources with { PinnedAppId = row.AppId, PinnedName = row.Name };
+                Sources.Save();
+                if (!_externalMode) SetSource(external: true, notice: $"siguiendo {row.Name}");
+                else Notice($"siguiendo {row.Name}");
+                return;
+        }
+    }
+
+    private void Notice(string text)
+    {
+        _sourceNotice = text;
+        _sourceChangedAt = Now;
     }
 
     /// <summary>Switches what the player shows; whichever side is left behind is paused so they never talk over each other.</summary>
@@ -376,7 +462,7 @@ public sealed class App
         int playerHeight = Math.Clamp(bodyHeight / 2 + 2, 16, 24);
         // The EQ draws its own spectrum, so the player gives up rows for taller sliders.
         if (_eqOpen) playerHeight = 14;
-        if (!_showLyrics && !_eqOpen)
+        if (!_showLyrics && !_eqOpen && !_sourcesOpen)
             DrawNowPlaying(c, rx, bodyTop, rw, bodyHeight);
         else if (bodyHeight - playerHeight >= 8)
         {
@@ -846,8 +932,61 @@ public sealed class App
 
     private void DrawLower(Canvas c, int x, int y, int w, int h, double dt)
     {
-        if (_eqOpen) DrawEqualizer(c, x, y, w, h, dt);
+        if (_sourcesOpen) DrawSources(c, x, y, w, h);
+        else if (_eqOpen) DrawEqualizer(c, x, y, w, h, dt);
         else DrawLyrics(c, x, y, w, h, dt);
+    }
+
+    // ── sources ────────────────────────────────────────────────────────
+
+    private double _sourcesListedAt = double.NegativeInfinity;
+
+    /// <summary>Where the player takes its music from: library, automatic, or a specific app (pinned).</summary>
+    private void DrawSources(Canvas c, int x, int y, int w, int h)
+    {
+        // Titles and statuses change under us; re-list about once a second while open.
+        if (Now - _sourcesListedAt > 1) { _sourcesListedAt = Now; External?.RefreshSessions(); }
+        string title = $"Fuentes · auto-seguir: {(Sources.AutoFollow ? "sí" : "no")}";
+        c.Box(x, y, w, h, title, BorderIn(_second), Accent);
+        int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
+        if (rows <= 0 || iw <= 10) return;
+
+        var list = SourceRows();
+        _sourceRow = Math.Clamp(_sourceRow, 0, list.Count - 1);
+        var selection = Rgb.Lerp(_palette.Backdrop, Theme.Selection, 0.25);
+        int nameW = Math.Clamp(iw / 3, 12, 18), statusW = 9;
+        int r = 0;
+        for (int i = 0; i < list.Count && r < rows - 2; i++, r++)
+        {
+            var row = list[i];
+            int ry = top + r;
+            bool selected = i == _sourceRow;
+            if (selected) c.FillRow(x + 1, ry, w - 2, selection);
+            if (row.Active) c.Text(ix, ry, "●", Accent);
+            c.Text(ix + 2, ry, row.Name, row.Active ? Accent : Theme.Text, bold: row.Active || selected, maxWidth: nameW);
+            int dx = ix + 2 + nameW + 1;
+            if (row.Kind == SourceKind.App)
+            {
+                c.Text(dx, ry, row.Status, row.Status == "sonando" ? _second : Muted, maxWidth: statusW);
+                dx += statusW + 1;
+            }
+            string pin = row.Pinned ? "◆ fijada" : "";
+            int detailW = ix + iw - dx - (pin.Length > 0 ? pin.Length + 2 : 0);
+            if (detailW > 3) c.Text(dx, ry, row.Detail, _fx ? Rgb.Lerp(Muted, _third, 0.4) : Muted, maxWidth: detailW);
+            if (pin.Length > 0) c.Text(ix + iw - pin.Length, ry, pin, _third);
+            // The sessions list arrives a moment after opening.
+            if (i == 1 && list.Count == 2 && External is not null && r + 1 < rows - 2)
+            {
+                r++;
+                c.Text(ix + 2, top + r, "ninguna otra app con sesión de medios (abre Spotify o YouTube Music)", Muted, maxWidth: iw - 2);
+            }
+        }
+        string help = External is null
+            ? "seguir otras apps está desactivado (--no-external)"
+            : Sources.AutoFollow
+                ? "auto-seguir: si otra app suena con Nation en pausa, la sigue"
+                : "auto-seguir apagado: solo cambia si eliges aquí";
+        c.Text(ix, top + rows - 1, help, Muted, maxWidth: iw);
     }
 
     // ── equalizer ──────────────────────────────────────────────────────
@@ -1379,9 +1518,14 @@ public sealed class App
         ("e", "cerrar"), ("espacio", "play"), ("n/p", "sig/ant"),
     };
 
+    private static readonly (string Key, string Label)[] SourceHints =
+    {
+        ("j/k", "mover"), ("enter", "usar"), ("a", "auto-seguir"), ("o", "cerrar"), ("espacio", "play"), ("n/p", "sig/ant"),
+    };
+
     private static readonly (string Key, string Label)[] Hints =
     {
-        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("o", "fuente"), ("l", "letra"), ("e", "ecualizador"), ("f", "fx"), ("v", "visual"),
+        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("o", "fuentes"), ("l", "letra"), ("e", "ecualizador"), ("f", "fx"), ("v", "visual"),
         ("+/-", "vol"), ("m", "mute"), ("enter", "reproducir"), (",/.", "desfase"), ("c", "actual"), ("j/k", "mover"),
     };
 
@@ -1393,7 +1537,7 @@ public sealed class App
         c.Text(quitX, y, "q", Accent);
         c.Text(quitX + 2, y, "salir", Muted);
         int hint = 0;
-        foreach (var (key, label) in _eqOpen ? EqHints : Hints)
+        foreach (var (key, label) in _sourcesOpen ? SourceHints : _eqOpen ? EqHints : Hints)
         {
             if (x + key.Length + label.Length + 3 > quitX) break;
             var keyColor = !_fx ? Accent : (hint++ % 3) switch { 0 => Accent, 1 => _second, _ => _third };

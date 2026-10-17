@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using Nation.Art;
 using Nation.Audio;
 using Nation.Library;
@@ -33,6 +34,14 @@ public sealed class App
     private int _lastIndex = -2;
     private double _trackChangedAt;
 
+    // Cyberpunk effects (toggle with `f`): decode-in text, glitch bursts, neon border runner.
+    private bool _fx = true;
+    private Rgb _neon = Fx.Neon(ArtPalette.Default.Accent);
+    private double _glitchAt, _glitchUntil, _nextGlitch = 6;
+    private int _glitchSeed;
+    private double _bass;
+    private const double DecodeTime = 0.7;
+
     private readonly float[] _bars = new float[SpectrumAnalyzer.BandCount];
     private readonly float[] _peaks = new float[SpectrumAnalyzer.BandCount];
 
@@ -46,6 +55,8 @@ public sealed class App
     private double _lyricOffsetChangedAt = double.NegativeInfinity;
     private double _lyricScroll;
     private string? _lyricsText;
+    private int _activeLyric = -1;
+    private double _activeLyricAt;
     private (LyricSheet? Sheet, int Width, List<(int Line, string Text)> Rows) _wrapCache;
     private const string Spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
@@ -84,6 +95,7 @@ public sealed class App
             case ConsoleKey.S: _player.ToggleShuffle(); JumpToCurrent(); break;
             case ConsoleKey.C: JumpToCurrent(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
+            case ConsoleKey.F: _fx = !_fx; break;
             case ConsoleKey.R: _player.ToggleRepeat(); break;
             case ConsoleKey.RightArrow: _player.SeekRelative(shift ? 30 : 5); break;
             case ConsoleKey.LeftArrow: _player.SeekRelative(shift ? -30 : -5); break;
@@ -146,6 +158,7 @@ public sealed class App
         {
             _lastIndex = current;
             _trackChangedAt = now;
+            TriggerGlitch(now, 0.22);
         }
         if (current >= 0 && DateTime.UtcNow - _lastManualMove > FollowDelay)
             _cursor = current;
@@ -153,6 +166,7 @@ public sealed class App
         UpdatePalette(dt);
         UpdateSpectrum(dt);
         UpdateLyrics();
+        UpdateFx(now);
 
         DrawHeader(c);
         int bodyTop = 1, bodyHeight = c.Height - 2;
@@ -215,6 +229,32 @@ public sealed class App
     private static bool Close(Rgb a, Rgb b) =>
         Math.Abs(a.R - b.R) <= 6 && Math.Abs(a.G - b.G) <= 6 && Math.Abs(a.B - b.B) <= 6;
 
+    private void TriggerGlitch(double now, double length)
+    {
+        _glitchAt = now;
+        _glitchUntil = now + length;
+        _glitchSeed++;
+    }
+
+    private bool Glitching => _fx && Now < _glitchUntil;
+
+    /// <summary>Glitch sub-frame: changes ~25 times a second so a burst stutters instead of sliding.</summary>
+    private int GlitchTick => (int)((Now - _glitchAt) * 25) + _glitchSeed * 1000;
+
+    private void UpdateFx(double now)
+    {
+        _neon = Fx.Neon(Accent);
+        _bass = Math.Max(Sample(_bars, 0.5), Sample(_bars, 2));
+        if (!_fx) return;
+        // Ambient bursts only while playing (the loop is at 30 fps then anyway); paused stays idle.
+        if (_player.Playing && now >= _nextGlitch)
+        {
+            TriggerGlitch(now, 0.08 + Fx.Noise(_glitchSeed, 7) * 0.14);
+            _nextGlitch = now + 5 + Fx.Noise(_glitchSeed, 11) * 9;
+        }
+        if (now < _glitchUntil) _animFast = true;
+    }
+
     private void UpdateSpectrum(double dt)
     {
         // Loopback hears every app; only capture while Nation itself is playing.
@@ -251,7 +291,15 @@ public sealed class App
 
     private void DrawHeader(Canvas c)
     {
-        int x = c.Text(1, 0, "◆ NATION", Accent, bold: true) + 3;
+        // Logo glows with the bass and stutters during glitch bursts.
+        var logo = _fx ? Rgb.Lerp(Accent, Fx.White, _bass * 0.75) : Accent;
+        int x = c.Text(1, 0, "◆ NATION", logo, bold: true) + 3;
+        if (Glitching)
+        {
+            int tick = GlitchTick;
+            for (int i = 3; i < 9; i++)
+                if (Fx.Noise(tick, i) < 0.35) c.Set(1 + i, 0, Fx.Glyph(tick, i + 50), Fx.Noise(tick, i + 90) < 0.5 ? _neon : Fx.White, bold: true);
+        }
         string state = _player.Idle ? "■ detenido" : _player.Paused ? "❚❚ pausa" : "▶ reproduciendo";
         x += c.Text(x, 0, state, Theme.Muted) + 3;
         if (_player.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
@@ -317,6 +365,7 @@ public sealed class App
             bool playing = i == current, selected = i == _cursor;
 
             if (selected) c.FillRow(rx, ry, inner, selection);
+            if (selected && _fx) c.Set(rx, ry, '▌', _neon, selection);
             if (playing) DrawMiniEq(c, rx + 1, ry);
             c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), Theme.Muted);
 
@@ -326,6 +375,13 @@ public sealed class App
             int used = c.Text(textX, ry, t.Title, playing ? Accent : Theme.Text, bold: playing, maxWidth: textMax);
             if (used + 3 < textMax)
                 c.Text(textX + used, ry, " · " + t.Artist, Theme.Muted, maxWidth: textMax - used);
+            if (playing && _fx && _player.Playing)
+            {
+                // A light band sweeps across the playing title every few seconds.
+                double sweep = Now % 4.0 / 0.9 * (used + 6) - 3;
+                for (int col = Math.Max(0, (int)sweep - 2); col <= sweep + 2 && col < used; col++)
+                    c.Recolor(textX + col, ry, Rgb.Lerp(Accent, Fx.White, 1 - Math.Abs(col - sweep) / 3));
+            }
             c.Text(rx + inner - dur.Length - 1, ry, dur, Theme.Muted);
         }
     }
@@ -344,7 +400,8 @@ public sealed class App
 
     private void DrawNowPlaying(Canvas c, int x, int y, int w, int h)
     {
-        c.Box(x, y, w, h, "Reproduciendo", Theme.Border, Theme.Muted);
+        c.Box(x, y, w, h, "Reproduciendo", PanelBorder, Theme.Muted);
+        if (_fx && _player.Playing) DrawBorderRunner(c, x, y, w, h);
         int ix = x + 3, iw = w - 6;
         var t = _player.Current;
         if (t is null)
@@ -353,18 +410,25 @@ public sealed class App
             return;
         }
 
-        // Fade the metadata in from the backdrop tint on every track change.
+        // Metadata enters on every track change: decoded from noise (fx) or faded in from the backdrop tint.
         double age = Now - _trackChangedAt;
-        double fade = Math.Clamp(age / 0.45, 0, 1);
-        if (fade < 1) _animFast = true;
+        double fade = _fx ? 1 : Math.Clamp(age / 0.45, 0, 1);
+        if (fade < 1 || (_fx && age < DecodeTime + 0.1)) _animFast = true;
         fade = 1 - Math.Pow(1 - fade, 3); // ease-out
         var from = _palette.Backdrop;
 
-        DrawMarquee(c, ix, y + 2, iw, t.Title, Rgb.Lerp(from, Theme.Text, fade), bold: true, age);
-        DrawMarquee(c, ix, y + 3, iw, t.Artist, Rgb.Lerp(from, Accent, fade), bold: false, age);
+        DrawMarquee(c, ix, y + 2, iw, t.Title, Rgb.Lerp(from, Theme.Text, fade), bold: true, age, row: 0);
+        DrawMarquee(c, ix, y + 3, iw, t.Artist, Rgb.Lerp(from, Accent, fade), bold: false, age, row: 1);
         string album = t.Year > 0 ? $"{t.Album} · {t.Year}" : t.Album;
-        c.Text(ix, y + 4, album, Rgb.Lerp(from, Theme.Muted, fade), maxWidth: iw);
-        c.Text(ix, y + 5, t.QualityTag, Rgb.Lerp(from, Theme.Muted, fade), maxWidth: iw);
+        if (!DrawDecoded(c, ix, y + 4, iw, album, Theme.Muted, false, age, row: 2))
+            c.Text(ix, y + 4, album, Rgb.Lerp(from, Theme.Muted, fade), maxWidth: iw);
+        if (!DrawDecoded(c, ix, y + 5, iw, t.QualityTag, Theme.Muted, false, age, row: 3))
+            c.Text(ix, y + 5, t.QualityTag, Rgb.Lerp(from, Theme.Muted, fade), maxWidth: iw);
+        if (Glitching)
+        {
+            GlitchRow(c, ix, y + 2, iw, 0);
+            GlitchRow(c, ix, y + 3, iw, 1);
+        }
 
         // Transport block sits at the bottom; the spectrum fills what's between.
         int by = Math.Max(y + h - 5, y + 9);
@@ -382,6 +446,75 @@ public sealed class App
         int volW = Math.Min(20, iw - 9), volFill = _player.Muted ? 0 : (int)Math.Round(_player.Volume / 100 * volW);
         for (int i = 0; i < volW; i++)
             c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i < volFill ? Accent : Theme.Track);
+    }
+
+    private Rgb PanelBorder => _fx ? Rgb.Lerp(Theme.Border, Accent, 0.3) : Theme.Border;
+
+    /// <summary>A bright packet with a fading tail that circles the panel border.</summary>
+    private void DrawBorderRunner(Canvas c, int x, int y, int w, int h)
+    {
+        int perimeter = 2 * (w - 1) + 2 * (h - 1);
+        if (perimeter <= 0) return;
+        const double lap = 4.0; // seconds per loop
+        const int tail = 12;
+        int head = (int)(Now % lap / lap * perimeter);
+        for (int k = 0; k < tail; k++)
+        {
+            int p = ((head - k) % perimeter + perimeter) % perimeter;
+            var (cx, cy) =
+                p < w - 1 ? (x + p, y) :
+                p < w - 1 + h - 1 ? (x + w - 1, y + p - (w - 1)) :
+                p < 2 * (w - 1) + h - 1 ? (x + w - 1 - (p - (w - 1 + h - 1)), y + h - 1) :
+                (x, y + h - 1 - (p - (2 * (w - 1) + h - 1)));
+            double t = 1 - k / (double)tail;
+            c.Recolor(cx, cy, k == 0 ? Fx.White : Rgb.Lerp(PanelBorder, _neon, t * t));
+        }
+    }
+
+    /// <summary>
+    /// Draws text resolving out of scrambled glyphs, left to right with jitter, each character
+    /// flashing white as it locks in. Returns false once the effect is over (caller draws normally).
+    /// </summary>
+    private bool DrawDecoded(Canvas c, int x, int y, int w, string text, Rgb fg, bool bold, double age, int row)
+    {
+        if (!_fx || age >= DecodeTime) return false;
+        var runes = text.EnumerateRunes().ToArray();
+        int n = Math.Max(1, runes.Length - 1), tick = (int)(Now * 20), col = 0;
+        double rowDelay = row * 0.05;
+        var noiseColor = Rgb.Lerp(_palette.Backdrop, _neon, 0.75);
+        for (int i = 0; i < runes.Length; i++)
+        {
+            int rw = TextWidth.Of(runes[i]);
+            if (rw == 0) continue;
+            if (col + rw > w) break;
+            double appearAt = rowDelay + i / (double)n * 0.2;
+            double lockAt = Math.Min(DecodeTime - 0.05, rowDelay + 0.12 + i / (double)n * 0.35 + Fx.Noise(i, row + _lastIndex * 7) * 0.15);
+            if (age >= lockAt)
+            {
+                var color = age - lockAt < 0.07 ? Fx.White : fg;
+                c.Set(x + col, y, runes[i], color, bold: bold);
+                if (rw == 2) c.Set(x + col + 1, y, default(Rune), color, bold: bold);
+            }
+            else if (age >= appearAt && runes[i].Value != ' ')
+                for (int k = 0; k < rw; k++)
+                    c.Set(x + col + k, y, Fx.Glyph(i * 31 + k + row * 997, tick), noiseColor, bold: bold);
+            col += rw;
+        }
+        return true;
+    }
+
+    /// <summary>Glitch burst on one row: horizontal tear plus a few neon-tinted cells.</summary>
+    private void GlitchRow(Canvas c, int x, int y, int w, int row)
+    {
+        int tick = GlitchTick;
+        if (Fx.Noise(tick, row) < 0.6)
+            c.ShiftRow(x, y, w, (int)(Fx.Noise(tick, row + 13) * 5) - 2);
+        for (int col = 0; col < w; col++)
+        {
+            double r = Fx.Noise(tick, col + row * 131);
+            if (r < 0.06) c.Recolor(x + col, y, _neon);
+            else if (r < 0.10) c.Recolor(x + col, y, Fx.Cyan);
+        }
     }
 
     // ── lyrics ─────────────────────────────────────────────────────────
@@ -432,7 +565,7 @@ public sealed class App
             title += $" · desfase {_lyricOffset:+0.00;-0.00;0.00}s";
         else if (sheet is not null && !sheet.Synced && recentNudge)
             title += " · desfase no aplica";
-        c.Box(x, y, w, h, title, Theme.Border, Theme.Muted);
+        c.Box(x, y, w, h, title, PanelBorder, Theme.Muted);
 
         int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
         if (rows <= 0 || iw <= 4) return;
@@ -463,6 +596,8 @@ public sealed class App
 
         double pos = _player.Position + _lyricOffset;
         int active = sheet.IndexAt(pos);
+        if (active != _activeLyric) { _activeLyric = active; _activeLyricAt = Now; }
+        double lineAge = Now - _activeLyricAt;
         int activeLine = Math.Max(active, 0), activeRow = 0;
         while (activeRow < wrapped.Count - 1 && wrapped[activeRow].Line < activeLine) activeRow++;
         // Active line sits a third from the top so more upcoming lines are visible.
@@ -502,6 +637,16 @@ public sealed class App
                 c.Text(cx, ry, text, Theme.Text, bold: true, maxWidth: iw);
                 for (int col = 0; col < rowFill; col++)
                     c.Recolor(cx + col, ry, Accent);
+                if (_fx)
+                {
+                    // White-hot edge where the karaoke fill is advancing.
+                    if (rowFill > 0 && rowFill < width)
+                    {
+                        c.Recolor(cx + rowFill - 1, ry, Fx.White);
+                        if (rowFill > 1) c.Recolor(cx + rowFill - 2, ry, Rgb.Lerp(Accent, Fx.White, 0.5));
+                    }
+                    if (lineAge < 0.3) ScrambleIn(c, cx, ry, text, width, lineAge / 0.3, wi);
+                }
             }
             else
             {
@@ -511,6 +656,23 @@ public sealed class App
                 var color = Rgb.Lerp(baseColor, _palette.Backdrop, Math.Min(distance, 6) / 9.0);
                 CenterText(c, ix, ry, iw, text.Length == 0 ? "♪" : text, color);
             }
+        }
+    }
+
+    /// <summary>Overlays noise on the not-yet-resolved tail of a freshly activated lyric row.</summary>
+    private void ScrambleIn(Canvas c, int x, int y, string text, int width, double progress, int seed)
+    {
+        _animFast = true;
+        int resolved = (int)(progress * width), col = 0, tick = (int)(Now * 20);
+        foreach (var rune in text.EnumerateRunes())
+        {
+            int rw = TextWidth.Of(rune);
+            if (rw == 0) continue;
+            if (col + rw > width) break;
+            if (col >= resolved && rune.Value != ' ')
+                for (int k = 0; k < rw; k++)
+                    c.Set(x + col + k, y, Fx.Glyph(col + k + seed * 53, tick), _neon, bold: true);
+            col += rw;
         }
     }
 
@@ -552,8 +714,9 @@ public sealed class App
     }
 
     /// <summary>Scrolls text that doesn't fit: 2 s hold, scroll, loop.</summary>
-    private void DrawMarquee(Canvas c, int x, int y, int w, string text, Rgb fg, bool bold, double age)
+    private void DrawMarquee(Canvas c, int x, int y, int w, string text, Rgb fg, bool bold, double age, int row)
     {
+        if (DrawDecoded(c, x, y, w, text, fg, bold, age, row)) return;
         if (TextWidth.Of(text) <= w)
         {
             c.Text(x, y, text, fg, bold: bold, maxWidth: w);
@@ -577,7 +740,7 @@ public sealed class App
         int count = Math.Max(1, (w + 1) / 2);
         int offsetX = x + (w - (count * 2 - 1)) / 2;
         var low = Rgb.Lerp(_palette.Backdrop, Accent, 0.45);
-        var peakColor = Rgb.Lerp(Accent, Theme.Text, 0.5);
+        var peakColor = _fx ? Rgb.Lerp(_neon, Fx.White, 0.6) : Rgb.Lerp(Accent, Theme.Text, 0.5);
 
         for (int b = 0; b < count; b++)
         {
@@ -591,15 +754,23 @@ public sealed class App
                 int cy = y + h - 1 - r;
                 int fill = Math.Clamp(eighths - r * 8, 0, 8);
                 if (fill > 0)
-                    c.Set(cx, cy, Eighths[fill], Rgb.Lerp(low, Accent, h == 1 ? 1 : r / (double)(h - 1)));
+                    c.Set(cx, cy, Eighths[fill], SpectrumColor(low, h == 1 ? 1 : r / (double)(h - 1)));
                 else if (r == peakRow && peakRow > 0)
                     c.Set(cx, cy, '▁', peakColor);
             }
         }
     }
 
+    /// <summary>Bottom-to-top bar gradient: backdrop to accent, then (fx) on into the neon counterpart.</summary>
+    private Rgb SpectrumColor(Rgb low, double t)
+    {
+        if (!_fx) return Rgb.Lerp(low, Accent, t);
+        return t < 0.6 ? Rgb.Lerp(low, Accent, t / 0.6) : Rgb.Lerp(Accent, _neon, (t - 0.6) / 0.4);
+    }
+
     private void DrawProgress(Canvas c, int x, int y, int w, double fraction)
     {
+        if (_fx) { DrawNeonProgress(c, x, y, w, fraction); return; }
         // Half-cell resolution via the right-half heavy line glyph.
         double cells = Math.Clamp(fraction, 0, 1) * w;
         int full = (int)cells;
@@ -611,9 +782,28 @@ public sealed class App
         }
     }
 
+    /// <summary>Accent-to-neon gradient with a white-hot head and a light pulse running along the filled part.</summary>
+    private void DrawNeonProgress(Canvas c, int x, int y, int w, double fraction)
+    {
+        double cells = Math.Clamp(fraction, 0, 1) * w;
+        int full = (int)cells;
+        bool half = cells - full >= 0.5;
+        int end = half ? full : full - 1; // last lit column
+        double pulse = _player.Playing ? Now % 2.4 / 2.4 * (end + 10) - 5 : double.NaN;
+        for (int i = 0; i < w; i++)
+        {
+            if (i > end) { c.Set(x + i, y, '─', Theme.Track); continue; }
+            var color = Rgb.Lerp(Accent, _neon, w <= 1 ? 0 : i / (double)(w - 1));
+            double d = Math.Abs(i - pulse);
+            if (d < 3) color = Rgb.Lerp(color, Fx.White, (1 - d / 3) * 0.7);
+            if (i == end) color = Fx.White;
+            c.Set(x + i, y, i == full ? '╸' : '━', color);
+        }
+    }
+
     private static readonly (string Key, string Label)[] Hints =
     {
-        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"),
+        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"), ("f", "fx"),
         ("+/-", "vol"), ("m", "mute"), ("enter", "reproducir"), (",/.", "desfase"), ("c", "actual"), ("j/k", "mover"),
     };
 

@@ -109,6 +109,22 @@ public sealed class Canvas
         c.Fg = fg.Packed | (c.Fg & BoldBit);
     }
 
+    /// <summary>Slides a row segment dx columns (glitch effect); vacated cells become blank.</summary>
+    public void ShiftRow(int x, int y, int width, int dx)
+    {
+        if (y < 0 || y >= Height || dx == 0) return;
+        x = Math.Max(0, x);
+        width = Math.Min(width, Width - x);
+        if (width <= Math.Abs(dx)) return;
+        var row = _cells.AsSpan(y * Width + x, width);
+        if (dx > 0) row[..^dx].CopyTo(row[dx..]);
+        else row[-dx..].CopyTo(row);
+        var vacated = dx > 0 ? row[..dx] : row[^(-dx)..];
+        foreach (ref var c in vacated) { c.Ch = Space; c.Fg = 0; }
+        // A wide glyph's right half may have lost its left half at the edge.
+        if (row[0].Ch == 0) row[0].Ch = Space;
+    }
+
     public void FillRow(int x, int y, int width, Rgb bg)
     {
         if (y < 0 || y >= Height) return;

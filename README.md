@@ -21,6 +21,7 @@ Arranca en pausa con la primera canción cargada. Sin argumentos usa la carpeta 
 - **Espectro**: captura WASAPI loopback (portado del `SpectrumAnalyzer` de Shade). Escucha la salida completa del sistema; mientras Nation está en pausa las barras caen.
 - **Letras**: incrustadas (SYLT sincronizado en MP3, `LYRICS`/`UNSYNCEDLYRICS` en FLAC/Opus, etc.) → `.lrc`/`.txt` junto al archivo → LRCLIB. Si la letra local no está sincronizada se busca una versión sincronizada en LRCLIB. Lo descargado se cachea en `%LOCALAPPDATA%\Nation\lyrics` (incluidos los "no encontrado"), así cada canción toca internet una sola vez. Se limpia la basura de Genius que meten algunos descargadores. Sincronizadas: línea activa con relleno tipo karaoke y el resto se desvanece con la distancia; sin sincronizar: scroll proporcional a la canción.
 - Marquesina para títulos largos, fade-in al cambiar de canción, mini ecualizador en la cola, barra de progreso con resolución de medio carácter.
+- **Efectos ciberpunk** (`f` los activa/desactiva): al cambiar de canción el título, artista y álbum se "descifran" desde glifos katakana/hex con destello blanco; ráfagas de glitch (desgarro horizontal + celdas cian/magenta) al cambiar de pista y de vez en cuando mientras suena; neón de dos tonos (color de la carátula + su complementario saturado) en espectro y barra de progreso, con cabeza incandescente y pulso de luz; un paquete de luz recorre el borde del panel; el logo brilla con los bajos; barrido de luz sobre la canción actual en la cola; la línea activa de la letra entra descifrándose y el relleno karaoke tiene borde incandescente. Todo corre solo mientras suena (en pausa sigue a 1 fps).
 
 ## Rendimiento
 
@@ -55,6 +56,7 @@ Nation expone en `127.0.0.1:7814` el mismo subconjunto de la API remota de Tauon
 | `c` | saltar el cursor a la canción actual |
 | `r` | repetir cola on/off |
 | `l` | mostrar / ocultar letra |
+| `f` | efectos ciberpunk on/off |
 | `,` / `.` | desfase de letra −/+ 0.25 s |
 | `j` / `k`, `↑` / `↓` | mover cursor en la cola |
 | `g` / `G` | inicio / final |

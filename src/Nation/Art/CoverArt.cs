@@ -14,11 +14,11 @@ public static class CoverArt
     // Albums share covers, so cache by the image source rather than by track.
     private static readonly ConcurrentDictionary<string, ArtPalette> Cache = new();
 
-    public static async Task<ArtPalette> PaletteForAsync(string trackPath)
+    public static async Task<ArtPalette> PaletteForAsync(Library.Track track)
     {
         try
         {
-            var (key, bytes) = FindCover(trackPath);
+            var (key, bytes) = FindCover(track);
             if (bytes is null) return ArtPalette.Default;
             if (Cache.TryGetValue(key, out var cached)) return cached;
 
@@ -35,7 +35,14 @@ public static class CoverArt
     }
 
     /// <summary>Cover bytes (embedded front cover, else folder image) plus a cache key; Bytes null when none.</summary>
-    public static (string Key, byte[]? Bytes) FindCover(string trackPath)
+    public static (string Key, byte[]? Bytes) FindCover(Library.Track track)
+    {
+        // Another app's track: the cover came with its media session.
+        if (track.IsExternal) return (track.CoverKey ?? "", track.Cover);
+        return FindCover(track.Path);
+    }
+
+    private static (string Key, byte[]? Bytes) FindCover(string trackPath)
     {
         using (var file = TagLib.File.Create(trackPath))
         {

@@ -156,7 +156,7 @@ public sealed class MediaSession : IDisposable
         {
             try
             {
-                var (_, bytes) = CoverArt.FindCover(track.Path);
+                var (_, bytes) = CoverArt.FindCover(track);
                 if (bytes is null || !ReferenceEquals(_shownTrack, track)) return;
                 var stream = new InMemoryRandomAccessStream();
                 using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))

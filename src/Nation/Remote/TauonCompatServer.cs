@@ -33,7 +33,8 @@ public sealed class TauonCompatServer : IDisposable
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _cts = new();
     // Only the current track's cover is ever requested; keep just that one.
-    private (int Id, (byte[] Bytes, string Mime)? Art) _lastArt = (-1, null);
+    // Keyed by cover too: another app's cover can arrive after its title.
+    private (string Key, (byte[] Bytes, string Mime)? Art) _lastArt = ("", null);
     private readonly object _artLock = new();
 
     public ConcurrentQueue<Action> Commands { get; } = new();
@@ -182,7 +183,8 @@ public sealed class TauonCompatServer : IDisposable
         // Requests run concurrently; the two-field cache must not be read half-written.
         lock (_artLock)
         {
-            if (_lastArt.Id != id) _lastArt = (id, LoadArt());
+            string key = $"{id}:{t.CoverKey}";
+            if (_lastArt.Key != key) _lastArt = (key, LoadArt());
             art = _lastArt.Art;
         }
         return art is { } a ? ("200 OK", a.Mime, a.Bytes) : NotFound();
@@ -191,7 +193,7 @@ public sealed class TauonCompatServer : IDisposable
         {
             try
             {
-                var (_, bytes) = CoverArt.FindCover(t.Path);
+                var (_, bytes) = CoverArt.FindCover(t);
                 if (bytes is null) return null;
                 bool png = bytes.Length > 4 && bytes[0] == 0x89 && bytes[1] == 0x50;
                 return (bytes, png ? "image/png" : "image/jpeg");

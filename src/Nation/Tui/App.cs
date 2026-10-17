@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Nation.Art;
 using Nation.Audio;
+using Nation.External;
 using Nation.Library;
 using Nation.Lyrics;
 using Nation.Remote;
@@ -21,6 +22,20 @@ public sealed class App
     public MediaSession? Media { get; init; }
     /// <summary>Whether to keep session.json up to date (off for --snapshot).</summary>
     public bool PersistSession { get; init; }
+    /// <summary>Other apps' media sessions (Spotify, YouTube Music…), for skin mode; null when off.</summary>
+    public ExternalPlayer? External { get; init; }
+    /// <summary>--skin: follow another app from the start, even if it's paused.</summary>
+    public bool StartAsSkin { get; init; }
+
+    // Skin mode (`o`): the player panel, lyrics and transport keys follow another app.
+    // The queue, equalizer and saved session always stay on Nation's own library.
+    private bool _externalMode;
+    private bool _extWasPlaying, _localWasPlaying, _skinApplied;
+    private double _sourceChangedAt = double.NegativeInfinity;
+    private string? _sourceNotice;
+
+    /// <summary>What the player panel shows and the transport keys control.</summary>
+    private IPlayback Playback => _externalMode && External is { } ext ? ext : _player;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private double _lastFrame;
 
@@ -158,10 +173,10 @@ public sealed class App
             case ConsoleKey.Q:
             case ConsoleKey.C when key.Modifiers.HasFlag(ConsoleModifiers.Control):
                 return false;
-            case ConsoleKey.Spacebar: _player.TogglePause(); break;
-            case ConsoleKey.N: _player.Next(); break;
-            case ConsoleKey.P: _player.Previous(); break;
-            case ConsoleKey.S: _player.ToggleShuffle(); JumpToCurrent(); break;
+            case ConsoleKey.Spacebar: Playback.TogglePause(); break;
+            case ConsoleKey.N: Playback.Next(); break;
+            case ConsoleKey.P: Playback.Previous(); break;
+            case ConsoleKey.S: Playback.ToggleShuffle(); JumpToCurrent(); break;
             case ConsoleKey.C: JumpToCurrent(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
@@ -170,12 +185,12 @@ public sealed class App
                 _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length);
                 _visualChangedAt = Now;
                 break;
-            case ConsoleKey.R: _player.ToggleRepeat(); break;
-            case ConsoleKey.RightArrow: _player.SeekRelative(shift ? 30 : 5); break;
-            case ConsoleKey.LeftArrow: _player.SeekRelative(shift ? -30 : -5); break;
-            case ConsoleKey.M: _player.ToggleMute(); break;
-            case ConsoleKey.OemPlus or ConsoleKey.Add: _player.AddVolume(5); break;
-            case ConsoleKey.OemMinus or ConsoleKey.Subtract: _player.AddVolume(-5); break;
+            case ConsoleKey.R: Playback.ToggleRepeat(); break;
+            case ConsoleKey.RightArrow: Playback.SeekRelative(shift ? 30 : 5); break;
+            case ConsoleKey.LeftArrow: Playback.SeekRelative(shift ? -30 : -5); break;
+            case ConsoleKey.M: Playback.ToggleMute(); break;
+            case ConsoleKey.OemPlus or ConsoleKey.Add: Playback.AddVolume(5); break;
+            case ConsoleKey.OemMinus or ConsoleKey.Subtract: Playback.AddVolume(-5); break;
             case ConsoleKey.J or ConsoleKey.DownArrow: MoveCursor(1); break;
             case ConsoleKey.K or ConsoleKey.UpArrow: MoveCursor(-1); break;
             case ConsoleKey.PageDown: MoveCursor(10); break;
@@ -183,7 +198,10 @@ public sealed class App
             case ConsoleKey.G when shift: MoveCursor(queue.Count); break;
             case ConsoleKey.G or ConsoleKey.Home: MoveCursor(-queue.Count); break;
             case ConsoleKey.End: MoveCursor(queue.Count); break;
+            case ConsoleKey.O: ToggleSource(); break;
             case ConsoleKey.Enter:
+                // Picking a song from the library brings Nation back to its own player.
+                SetSource(external: false);
                 _player.PlayIndex(_cursor);
                 _lastManualMove = DateTime.MinValue;
                 break;
@@ -224,6 +242,66 @@ public sealed class App
 
     private void JumpToCurrent() => _lastManualMove = DateTime.MinValue;
 
+    /// <summary>Remote/media-key commands (UI thread): play, pause, stop, next, back, seek (ms), shuffle, repeat.</summary>
+    public void RunCommand(string command, long arg)
+    {
+        var p = Playback;
+        switch (command)
+        {
+            case "play": p.SetPaused(false); break;
+            case "pause" or "stop": p.SetPaused(true); break;
+            case "next": p.Next(); break;
+            case "back": p.Previous(); break;
+            case "seek": p.SeekAbsolute(arg / 1000.0); break;
+            case "shuffle": p.ToggleShuffle(); break;
+            case "repeat": p.ToggleRepeat(); break;
+        }
+    }
+
+    /// <summary>
+    /// Follows another app on its own when it starts playing music while Nation is quiet
+    /// (or when Nation is paused while it plays), and falls back when its session closes.
+    /// </summary>
+    private void UpdateSource()
+    {
+        if (External is not { } ext) return;
+        if (StartAsSkin && !_skinApplied && ext.HasSession)
+        {
+            _skinApplied = true;
+            SetSource(external: true);
+        }
+        bool extPlaying = ext.Playing && ext.LooksLikeMusic, localPlaying = _player.Playing;
+        if (!_externalMode && extPlaying && !localPlaying && (!_extWasPlaying || _localWasPlaying))
+            SetSource(external: true);
+        else if (_externalMode && !ext.HasSession)
+            SetSource(external: false, notice: "la otra app se cerró");
+        _extWasPlaying = extPlaying;
+        _localWasPlaying = localPlaying;
+    }
+
+    private void ToggleSource()
+    {
+        if (!_externalMode && External is not { HasSession: true })
+        {
+            _sourceNotice = "ninguna otra app está reproduciendo";
+            _sourceChangedAt = Now;
+            return;
+        }
+        SetSource(!_externalMode);
+    }
+
+    /// <summary>Switches what the player shows; whichever side is left behind is paused so they never talk over each other.</summary>
+    private void SetSource(bool external, string? notice = null)
+    {
+        if (external == _externalMode) return;
+        if (external && _player.Playing) _player.SetPaused(true);
+        if (!external && External is { Playing: true } ext && notice is null) ext.SetPaused(true);
+        _externalMode = external;
+        _sourceChangedAt = Now;
+        _sourceNotice = notice ?? (external ? $"siguiendo {External?.AppName}" : "biblioteca local");
+        _lastManualMove = DateTime.MinValue;
+    }
+
     private void NudgeLyrics(double delta)
     {
         _lyricOffsetChangedAt = Now;
@@ -252,11 +330,15 @@ public sealed class App
         _dt = dt;
         _animFast = _animSlow = false;
         _player.Refresh();
+        External?.Refresh();
+        UpdateSource();
 
         int current = _player.CurrentIndex;
-        if (current != _lastIndex)
+        // Track ids are unique across the library and other apps' tracks.
+        int shown = Playback.Current?.Id ?? -1;
+        if (shown != _lastIndex)
         {
-            _lastIndex = current;
+            _lastIndex = shown;
             _trackChangedAt = now;
             TriggerGlitch(now, 0.22);
         }
@@ -306,18 +388,21 @@ public sealed class App
         DrawFooter(c);
         if (_fx && now < BootTime) DrawBoot(c, now / BootTime);
         PublishRemote();
-        Media?.Update(_player.Current, _player.Idle, _player.Paused, _player.Shuffled, _player.Repeat, _player.Position, _player.Duration);
+        // While following another app, Nation's own media session steps aside (it would show a paused duplicate).
+        if (_externalMode) Media?.Update(null, true, true, false, false, 0, 0);
+        else Media?.Update(_player.Current, _player.Idle, _player.Paused, _player.Shuffled, _player.Repeat, _player.Position, _player.Duration);
 
         // Playing always animates (spectrum, progress, karaoke); otherwise only while something is settling.
-        NextFrameDelay = _player.Playing || _animFast ? FastFrame : _animSlow ? SlowFrame : IdleFrame;
+        NextFrameDelay = Playback.Playing || _animFast ? FastFrame : _animSlow ? SlowFrame : IdleFrame;
     }
 
     // ── animation state ────────────────────────────────────────────────
 
     private void UpdatePalette(double dt)
     {
-        var track = _player.Current;
-        if (!ReferenceEquals(track, _paletteFor))
+        var track = Playback.Current;
+        // Same id + cover = same palette (another app's track is rebuilt when its duration or cover lands).
+        if (track?.Id != _paletteFor?.Id || track?.CoverKey != _paletteFor?.CoverKey)
         {
             _paletteFor = track;
             if (track is null) _targetPalette = ArtPalette.Default;
@@ -326,7 +411,7 @@ public sealed class App
                 var requested = track;
                 _ = Task.Run(async () =>
                 {
-                    var p = await CoverArt.PaletteForAsync(requested.Path);
+                    var p = await CoverArt.PaletteForAsync(requested);
                     // Ignore results that arrive after the user already skipped ahead.
                     if (ReferenceEquals(_paletteFor, requested)) _targetPalette = p;
                 });
@@ -379,7 +464,7 @@ public sealed class App
         _bass = Math.Max(Sample(_bars, 0.5), Sample(_bars, 2));
         if (!_fx) return;
         // Ambient bursts only while playing (the loop is at 30 fps then anyway); paused stays idle.
-        if (_player.Playing && now >= _nextGlitch)
+        if (Playback.Playing && now >= _nextGlitch)
         {
             TriggerGlitch(now, 0.08 + Fx.Noise(_glitchSeed, 7) * 0.14);
             _nextGlitch = now + 10 + Fx.Noise(_glitchSeed, 11) * 10;
@@ -389,7 +474,7 @@ public sealed class App
 
     private void UpdateBeat(double now, double dt)
     {
-        bool live = _player.Playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
+        bool live = Playback.Playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
         var bands = _spectrum.Latest;
         if (live && _spectrum.LastFrameUtc != _lastAnalyzerFrame)
         {
@@ -434,7 +519,7 @@ public sealed class App
     private void UpdateSpectrum(double dt)
     {
         // Loopback hears every app; only capture while Nation itself is playing.
-        bool playing = _player.Playing;
+        bool playing = Playback.Playing;
         if (playing) _spectrum.Start();
         bool live = playing && DateTime.UtcNow - _spectrum.LastFrameUtc < TimeSpan.FromMilliseconds(250);
         var target = _spectrum.Latest;
@@ -481,15 +566,16 @@ public sealed class App
             for (int i = 3; i < 9; i++)
                 if (Fx.Noise(tick, i) < 0.35) c.Recolor(1 + i, 0, Fx.Noise(tick, i + 90) < 0.5 ? _second : _fourth);
         }
-        string state = _player.Idle ? "■ detenido" : _player.Paused ? "❚❚ pausa" : "▶ reproduciendo";
+        string state = Playback.Idle ? "■ detenido" : Playback.Paused ? "❚❚ pausa" : "▶ reproduciendo";
         if (state != _stateText) { _stateText = state; _stateChangedAt = Now; }
         double stateAge = Now - _stateChangedAt;
         if (stateAge < DecodeTime) _animFast = true;
-        var stateColor = !_fx ? Muted : _player.Idle ? Muted : _player.Paused ? _fourth : _second;
+        var stateColor = !_fx ? Muted : Playback.Idle ? Muted : Playback.Paused ? _fourth : _second;
         if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, stateColor, false, stateAge, row: 5)) c.Text(x, 0, state, stateColor);
         x += TextWidth.Of(state) + 3;
-        if (_player.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
-        if (_player.Repeat) c.Text(x, 0, "⟳ repetir", _fx ? _third : Accent);
+        if (_externalMode) x += c.Text(x, 0, $"◉ {External?.AppName}", _fx ? _third : Accent, bold: true) + 3;
+        if (Playback.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
+        if (Playback.Repeat) c.Text(x, 0, "⟳ repetir", _fx ? _third : Accent);
 
         string count = $"{_player.Queue.Count} pistas";
         int right = c.Width - count.Length - 1;
@@ -509,12 +595,12 @@ public sealed class App
     private void PublishRemote()
     {
         if (Remote is null) return;
-        var track = _player.Current;
-        string status = _player.Idle || track is null ? "stopped" : _player.Paused ? "paused" : "playing";
+        var track = Playback.Current;
+        string status = Playback.Idle || track is null ? "stopped" : Playback.Paused ? "paused" : "playing";
         Remote.Snapshot = new RemoteSnapshot(
-            status, _player.Shuffled, _player.Repeat,
-            (long)(_player.Position * 1000), track,
-            ReferenceEquals(_lyricsFor, track) ? _lyricsText : null);
+            status, Playback.Shuffled, Playback.Repeat,
+            (long)(Playback.Position * 1000), track,
+            SameLyrics(_lyricsFor, track) ? _lyricsText : null);
     }
 
     /// <summary>Serializes back to LRC so remote clients (Shade) get the same lyrics Nation found.</summary>
@@ -599,15 +685,20 @@ public sealed class App
     {
         bool notice = Now - _visualChangedAt < 2;
         if (notice) _animSlow = true;
-        string title = notice ? $"Reproduciendo · visual: {_visual.ToString().ToLowerInvariant()}" : "Reproduciendo";
+        bool sourceNotice = Now - _sourceChangedAt < 2.5 && _sourceNotice is not null;
+        if (sourceNotice) _animSlow = true;
+        string title = notice ? $"Reproduciendo · visual: {_visual.ToString().ToLowerInvariant()}"
+            : sourceNotice ? $"Reproduciendo · {_sourceNotice}"
+            : _externalMode ? $"Reproduciendo · {External?.AppName}" : "Reproduciendo";
+        notice |= sourceNotice;
         var border = _fx ? Rgb.Lerp(BorderIn(_second), _second, BeatStep * 0.8) : PanelBorder;
         c.Box(x, y, w, h, title, border, notice ? Accent : Muted);
-        if (_fx && _player.Playing) DrawBorderRunner(c, x, y, w, h);
+        if (_fx && Playback.Playing) DrawBorderRunner(c, x, y, w, h);
         int ix = x + 3, iw = w - 6;
-        var t = _player.Current;
+        var t = Playback.Current;
         if (t is null)
         {
-            c.Text(ix, y + 2, "Nada en reproducción", Muted, maxWidth: iw);
+            c.Text(ix, y + 2, _externalMode ? $"{External?.AppName} no está mostrando ninguna canción" : "Nada en reproducción", Muted, maxWidth: iw);
             return;
         }
 
@@ -636,16 +727,18 @@ public sealed class App
         int specTop = y + 7, specBottom = by - 2;
         if (specBottom - specTop >= 1) DrawVisual(c, ix, specTop, iw, specBottom - specTop + 1);
 
-        double pos = _player.Position, dur = _player.Duration;
+        double pos = Playback.Position, dur = Playback.Duration;
         DrawProgress(c, ix, by, iw, dur > 0 ? pos / dur : 0);
         c.Text(ix, by + 1, FormatTime(pos), Theme.Text);
         string total = FormatTime(dur);
         c.Text(ix + iw - total.Length, by + 1, total, Muted);
 
-        string volLabel = _player.Muted ? "vol mute" : $"vol {_player.Volume,3:0}";
+        // Another app's volume is its slider in the Windows mixer; unknown until read.
+        double appVol = Playback.Volume;
+        string volLabel = Playback.Muted ? "vol mute" : double.IsNaN(appVol) ? "vol  — " : $"vol {appVol,3:0}";
         c.Text(ix, by + 3, volLabel, Muted);
         // The bar glides to the new level and flashes after a change.
-        double vol = _player.Muted ? 0 : _player.Volume;
+        double vol = Playback.Muted || double.IsNaN(appVol) ? 0 : appVol;
         if (vol != _volTarget) { if (_volTarget >= 0) _volChangedAt = Now; _volTarget = vol; }
         _volShown = _volShown < 0 ? vol : _volShown + (vol - _volShown) * 0.35;
         if (Math.Abs(_volShown - vol) < 0.5) _volShown = vol; else _animFast = true;
@@ -768,6 +861,7 @@ public sealed class App
         bool on = _eq.Enabled;
         string title = $"Ecualizador · {_eq.PresetName}" + (on ? "" : " · apagado");
         if (_player.EqualizerError is { } err) title += $" · error: {err}";
+        if (_externalMode) title += $" · solo música local, no {External?.AppName}";
         var border = _fx ? Rgb.Lerp(BorderIn(_third), _second, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
         c.Box(x, y, w, h, title, border, on ? Accent : Muted);
 
@@ -867,8 +961,18 @@ public sealed class App
 
     private void UpdateLyrics()
     {
-        var track = _player.Current;
-        if (ReferenceEquals(track, _lyricsFor)) return;
+        var track = Playback.Current;
+        if (SameLyrics(track, _lyricsFor)) return;
+        // Another app's duration may land a moment after its title; LRCLIB matching needs it.
+        if (track is { IsExternal: true, Duration.Ticks: 0 } && Now - _trackChangedAt < 2)
+        {
+            _lyricsCts?.Cancel();
+            _lyricsFor = null;
+            _lyrics = null;
+            _lyricsText = null;
+            _lyricsLoading = true;
+            return;
+        }
 
         _lyricsFor = track;
         _lyrics = null;
@@ -890,6 +994,10 @@ public sealed class App
             _lyricsLoading = false;
         });
     }
+
+    /// <summary>Same song for lyrics purposes: same id and (whole-second) duration.</summary>
+    private static bool SameLyrics(Track? a, Track? b) =>
+        a is null ? b is null : b is not null && a.Id == b.Id && (int)a.Duration.TotalSeconds == (int)b.Duration.TotalSeconds;
 
     private void DrawLyrics(Canvas c, int x, int y, int w, int h, double dt)
     {
@@ -920,7 +1028,7 @@ public sealed class App
         {
             string msg = _lyricsLoading
                 ? $"{Spinner[(int)(Now * 12) % Spinner.Length]} buscando letra…"
-                : _player.Current is null ? "" : "sin letra para esta canción";
+                : Playback.Current is null ? "" : "sin letra para esta canción";
             CenterText(c, ix, top + rows / 2, iw, msg, Muted);
             return;
         }
@@ -929,9 +1037,9 @@ public sealed class App
         if (!sheet.Synced)
         {
             // No timing: scroll proportionally to playback so the text roughly keeps up.
-            double dur = _player.Duration;
+            double dur = Playback.Duration;
             int maxScroll = Math.Max(0, wrapped.Count - rows);
-            double target = dur > 0 ? Math.Clamp(_player.Position / dur, 0, 1) * maxScroll : 0;
+            double target = dur > 0 ? Math.Clamp(Playback.Position / dur, 0, 1) * maxScroll : 0;
             if (Math.Abs(target - _lyricScroll) > 0.02) _animFast = true;
             _lyricScroll += (target - _lyricScroll) * (1 - Math.Exp(-dt / 0.3));
             int first = Math.Clamp((int)Math.Round(_lyricScroll), 0, maxScroll);
@@ -940,7 +1048,7 @@ public sealed class App
             return;
         }
 
-        double pos = _player.Position + _lyricOffset;
+        double pos = Playback.Position + _lyricOffset;
         int active = sheet.IndexAt(pos);
         if (active != _activeLyric) { _activeLyric = active; _activeLyricAt = Now; }
         double lineAge = Now - _activeLyricAt;
@@ -1173,7 +1281,7 @@ public sealed class App
         for (int col = 0; col < w; col++)
         {
             double v = Sample(_bars, col / (double)Math.Max(1, w - 1) * (SpectrumAnalyzer.BandCount - 1));
-            if (_player.Playing) _rainY[col] += (2 + v * 28) * dt;
+            if (Playback.Playing) _rainY[col] += (2 + v * 28) * dt;
             int trail = 1 + (int)(v * h * 1.5);
             if (_rainY[col] - trail > h)
             {
@@ -1251,7 +1359,7 @@ public sealed class App
         bool half = cells - full >= 0.5;
         int end = half ? full : full - 1; // last lit column
         bool beating = Now - _lastBeatAt < 3;
-        double pulse = _player.Playing && !beating ? Now % 2.4 / 2.4 * (end + 10) - 5 : double.NaN;
+        double pulse = Playback.Playing && !beating ? Now % 2.4 / 2.4 * (end + 10) - 5 : double.NaN;
         _ripples.RemoveAll(t0 => (Now - t0) * 45 > end + 4);
         for (int i = 0; i < w; i++)
         {
@@ -1273,7 +1381,7 @@ public sealed class App
 
     private static readonly (string Key, string Label)[] Hints =
     {
-        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"), ("e", "ecualizador"), ("f", "fx"), ("v", "visual"),
+        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("o", "fuente"), ("l", "letra"), ("e", "ecualizador"), ("f", "fx"), ("v", "visual"),
         ("+/-", "vol"), ("m", "mute"), ("enter", "reproducir"), (",/.", "desfase"), ("c", "actual"), ("j/k", "mover"),
     };
 

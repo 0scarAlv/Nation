@@ -6,7 +6,7 @@ namespace Nation.Audio;
 /// Playback engine backed by libmpv. The queue lives in mpv's own playlist so
 /// gapless transitions and pre-buffering of the next track come for free.
 /// </summary>
-public sealed unsafe class Player : IDisposable
+public sealed unsafe class Player : IPlayback, IDisposable
 {
     private readonly IntPtr _mpv;
     private readonly List<Track> _queue = new();

@@ -13,7 +13,7 @@ dotnet run --project src/Nation -- "C:\ruta\a\musica"
 
 Instalador: `./scripts/build-installer.ps1` → `Descargas\Melomano\NationSetup-<versión>.exe` (self-contained, sin admin, agrega `nation` al PATH del usuario). Requiere Inno Setup 6.
 
-Arranca en pausa donde te quedaste: la última canción, en el segundo en que la dejaste, con el mismo volumen (se guarda cada 5 s y al salir en `%LOCALAPPDATA%\Nation\session.json`, así que sobrevive a cerrar la ventana; un `--volume` explícito tiene prioridad). La primera vez arranca con la primera canción. Sin argumentos usa la carpeta Música del usuario. `--shuffle` arranca en aleatorio. `--volume <0-100>` volumen inicial. `--offline` nunca consulta LRCLIB. `--no-api` / `--api-port <n>` controlan la API remota. `--no-media-keys` desactiva la integración con Windows. `--snapshot <archivo>` vuelca un frame como texto (debug, en mute).
+Arranca en pausa donde te quedaste: la última canción, en el segundo en que la dejaste, con el mismo volumen (se guarda cada 5 s y al salir en `%LOCALAPPDATA%\Nation\session.json`, así que sobrevive a cerrar la ventana; un `--volume` explícito tiene prioridad). La primera vez arranca con la primera canción. Sin argumentos usa la carpeta Música del usuario. `--shuffle` arranca en aleatorio. `--volume <0-100>` volumen inicial. `--offline` nunca consulta LRCLIB. `--no-api` / `--api-port <n>` controlan la API remota. `--no-media-keys` desactiva la integración con Windows. `--skin` arranca siguiendo a otra app (ver *Modo skin*), `--no-external` lo desactiva y `--sessions` lista las sesiones de medios que ve Windows. `--snapshot <archivo>` vuelca un frame como texto (debug, en mute).
 
 ## Visual
 
@@ -44,6 +44,15 @@ Arranca en pausa donde te quedaste: la última canción, en el segundo en que la
 
 Medido con 323 pistas (Release, self-contained): ~0.3 % de un núcleo en pausa, ~4 % sonando (con espectro), ~44 MB de memoria privada, arranque ~1.3 s. Claves: caché de tags en `%LOCALAPPDATA%\Nation\library.json` (solo se releen archivos nuevos o modificados), la cola se pasa a mpv con un solo `loadlist`, el render solo reescribe filas que cambiaron, y el bucle duerme hasta la siguiente animación o tecla (30 fps sonando, 1 fps en reposo). La captura del espectro se apaga cuando Nation no suena.
 
+## Modo skin: Spotify, YouTube Music y otras apps
+
+Nation puede hacer de skin de otro reproductor sin tocar su audio (el streaming de Spotify va cifrado; no se descifra ni se graba nada). Lee la sesión de medios de Windows (SMTC, la misma que usa el panel de volumen) y le manda los comandos de vuelta, igual que Shade. Funciona con Spotify de escritorio, YouTube Music en el navegador o en apps como th-ch/youtube-music, y con cualquier app que publique en SMTC.
+
+- **Qué se ve**: título, artista, álbum, carátula (con su paleta de colores), posición/duración, estado, aleatorio/repetir y el nombre de la app (`◉ Spotify` en el encabezado). Letras sincronizadas desde LRCLIB por artista/título/duración. El espectro, el visualizador y las animaciones con el ritmo funcionan igual, porque la captura loopback escucha cualquier app (si la app quedó en otra salida de audio distinta a la predeterminada, el espectro no la oye).
+- **Qué se controla**: `espacio`, `n`/`p`, `←`/`→` (seek), `s`, `r`, y `+`/`-`/`m` mueven el volumen de *esa app* en el mezclador de Windows (en todas las salidas). La API para Shade y las teclas multimedia también actúan sobre la app seguida. Cuando Nation sigue a otra app, retira su propia sesión de SMTC para no aparecer duplicado.
+- **Cuándo cambia**: si otra app empieza a reproducir música mientras Nation está en pausa (o pausas Nation mientras otra suena), Nation la sigue sola. Un navegador solo cuenta si reporta álbum (YouTube Music lo hace, un video normal de YouTube no), así que ver videos no secuestra el reproductor. `o` alterna a mano entre la biblioteca y la otra app (sigue también videos), `enter` sobre una canción de la cola vuelve a la biblioteca, y si la otra app se cierra Nation regresa sola. La que queda atrás se pausa para que nunca suenen dos a la vez.
+- **Límites**: el ecualizador solo procesa la música local (mpv); la cola y las playlists de Spotify no se exponen por SMTC, así que el panel izquierdo sigue mostrando la biblioteca local.
+
 ## Teclas multimedia de Windows
 
 Nation se publica en los controles multimedia del sistema (SMTC), así que las teclas ⏯ play/pausa, ⏭ siguiente, ⏮ anterior y ⏹ stop del teclado funcionan aunque la terminal no tenga el foco o esté minimizada. También aparece en el panel de volumen de Windows con título, artista, carátula y barra de posición (se puede adelantar desde ahí), y cualquier app que lea SMTC lo ve. Si otra app está sonando, Windows manda las teclas a la sesión activa más reciente.
@@ -72,6 +81,7 @@ Nation expone en `127.0.0.1:7814` el mismo subconjunto de la API remota de Tauon
 | `s` | aleatorio on/off (la canción actual sigue sonando) |
 | `c` | saltar el cursor a la canción actual |
 | `r` | repetir cola on/off |
+| `o` | fuente: biblioteca local ↔ otra app (Spotify, YouTube Music…) |
 | `l` | mostrar / ocultar letra |
 | `f` | efectos ciberpunk on/off |
 | `e` | ecualizador |
@@ -90,3 +100,5 @@ Nation expone en `127.0.0.1:7814` el mismo subconjunto de la API remota de Tauon
 4. ~~Integración con Shade (API tipo Tauon) · publicar en SMTC (teclas multimedia / overlay de Windows)~~
 - Sincronización automática de letras planas (alineación con Whisper) → `.lrc` junto al archivo
 5. Carátula Sixel/Kitty
+- ~~Modo skin para Spotify / YouTube Music vía SMTC~~
+- 1.0: playlists propias, navegación entre ellas estilo lf

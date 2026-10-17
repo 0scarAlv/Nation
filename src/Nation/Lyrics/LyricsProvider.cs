@@ -27,7 +27,8 @@ public sealed class LyricsProvider
 
     public async Task<LyricSheet?> FindAsync(Track track, CancellationToken ct)
     {
-        var local = FromTags(track.Path) ?? FromSidecar(track.Path);
+        // Another app's track has no file to read tags or a sidecar from.
+        var local = track.IsExternal ? null : FromTags(track.Path) ?? FromSidecar(track.Path);
         if (local is { Synced: true }) return local;
 
         // Local text exists but has no timing: a synced online version is an upgrade.

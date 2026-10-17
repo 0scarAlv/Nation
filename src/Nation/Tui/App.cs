@@ -63,6 +63,13 @@ public sealed class App
     private double _cursorMovedAt = double.NegativeInfinity;
     private double _level, _levelPeak;
     private double _dt;
+
+    // Equalizer panel (`e`): takes the lyrics' place while open.
+    private readonly Equalizer _eq;
+    private bool _eqOpen;
+    private int _eqBand;
+    private readonly double[] _eqShown = new double[Equalizer.Frequencies.Length];
+    private double _eqChangedAt = double.NegativeInfinity;
     private const double BootTime = 0.9;
 
     private readonly float[] _bars = new float[SpectrumAnalyzer.BandCount];
@@ -92,6 +99,9 @@ public sealed class App
         _player = player;
         _spectrum = spectrum;
         _lyricsProvider = lyrics;
+        _eq = Equalizer.Load();
+        _eq.Gains.CopyTo(_eqShown, 0);
+        _player.ApplyEqualizer(_eq);
     }
 
     private double Now => _clock.Elapsed.TotalSeconds;
@@ -102,6 +112,7 @@ public sealed class App
         var queue = _player.Queue;
         bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
         // Offset keys by character so they work on both US and Spanish layouts.
+        if (_eqOpen && HandleEqKey(key, shift)) return true;
         switch (key.KeyChar)
         {
             case ',': NudgeLyrics(-0.25); return true;
@@ -119,6 +130,7 @@ public sealed class App
             case ConsoleKey.C: JumpToCurrent(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
+            case ConsoleKey.E: _eqOpen = true; break;
             case ConsoleKey.V:
                 _visual = (Visual)(((int)_visual + 1) % Enum.GetValues<Visual>().Length);
                 _visualChangedAt = Now;
@@ -142,6 +154,31 @@ public sealed class App
                 break;
         }
         return true;
+    }
+
+    /// <summary>Keys while the equalizer is open; returns false to let the normal bindings handle it.</summary>
+    private bool HandleEqKey(ConsoleKeyInfo key, bool shift)
+    {
+        int bands = Equalizer.Frequencies.Length;
+        switch (key.Key)
+        {
+            case ConsoleKey.E or ConsoleKey.Escape: _eqOpen = false; return true;
+            case ConsoleKey.LeftArrow or ConsoleKey.H: _eqBand = (_eqBand - 1 + bands) % bands; return true;
+            case ConsoleKey.RightArrow: _eqBand = (_eqBand + 1) % bands; return true;
+            case ConsoleKey.UpArrow or ConsoleKey.K: ChangeEq(() => _eq.SetGain(_eqBand, _eq.Gains[_eqBand] + (shift ? 3 : 1))); return true;
+            case ConsoleKey.DownArrow or ConsoleKey.J: ChangeEq(() => _eq.SetGain(_eqBand, _eq.Gains[_eqBand] - (shift ? 3 : 1))); return true;
+            case ConsoleKey.D0 or ConsoleKey.NumPad0: ChangeEq(() => _eq.SetGain(_eqBand, 0)); return true;
+            case ConsoleKey.Tab: ChangeEq(() => _eq.CyclePreset(shift ? -1 : 1)); return true;
+            case ConsoleKey.B: ChangeEq(_eq.ToggleEnabled); return true;
+        }
+        return false;
+    }
+
+    private void ChangeEq(Action change)
+    {
+        change();
+        _player.ApplyEqualizer(_eq);
+        _eqChangedAt = Now;
     }
 
     private void MoveCursor(int delta)
@@ -206,15 +243,17 @@ public sealed class App
         int rx = leftWidth, rw = c.Width - leftWidth;
         // Taller terminals give the visualizer more rows.
         int playerHeight = Math.Clamp(bodyHeight / 2 + 2, 16, 24);
-        if (!_showLyrics)
+        // The EQ draws its own spectrum, so the player gives up rows for taller sliders.
+        if (_eqOpen) playerHeight = 14;
+        if (!_showLyrics && !_eqOpen)
             DrawNowPlaying(c, rx, bodyTop, rw, bodyHeight);
-        else if (bodyHeight - playerHeight >= 6)
+        else if (bodyHeight - playerHeight >= 8)
         {
             DrawNowPlaying(c, rx, bodyTop, rw, playerHeight);
-            DrawLyrics(c, rx, bodyTop + playerHeight, rw, bodyHeight - playerHeight, dt);
+            DrawLower(c, rx, bodyTop + playerHeight, rw, bodyHeight - playerHeight, dt);
         }
         else
-            DrawLyrics(c, rx, bodyTop, rw, bodyHeight, dt);
+            DrawLower(c, rx, bodyTop, rw, bodyHeight, dt);
         DrawFooter(c);
         if (_fx && now < BootTime) DrawBoot(c, now / BootTime);
         PublishRemote();
@@ -373,7 +412,7 @@ public sealed class App
         {
             int tick = GlitchTick;
             for (int i = 3; i < 9; i++)
-                if (Fx.Noise(tick, i) < 0.35) c.Set(1 + i, 0, Fx.Glyph(tick, i + 50), Fx.Noise(tick, i + 90) < 0.5 ? _neon : Fx.White, bold: true);
+                if (Fx.Noise(tick, i) < 0.35) c.Recolor(1 + i, 0, Fx.Noise(tick, i + 90) < 0.5 ? _neon : Fx.Cyan);
         }
         string state = _player.Idle ? "■ detenido" : _player.Paused ? "❚❚ pausa" : "▶ reproduciendo";
         if (state != _stateText) { _stateText = state; _stateChangedAt = Now; }
@@ -596,16 +635,16 @@ public sealed class App
     }
 
     /// <summary>
-    /// Draws text resolving out of scrambled glyphs, left to right with jitter, each character
-    /// flashing white as it locks in. Returns false once the effect is over (caller draws normally).
+    /// Draws text lighting up left to right with jitter: each character appears as a dim neon
+    /// ghost, then flashes white as it locks in. Returns false once the effect is over (caller draws normally).
     /// </summary>
     private bool DrawDecoded(Canvas c, int x, int y, int w, string text, Rgb fg, bool bold, double age, int row)
     {
         if (!_fx || age >= DecodeTime) return false;
         var runes = text.EnumerateRunes().ToArray();
-        int n = Math.Max(1, runes.Length - 1), tick = (int)(Now * 20), col = 0;
+        int n = Math.Max(1, runes.Length - 1), col = 0;
         double rowDelay = row * 0.05;
-        var noiseColor = Rgb.Lerp(_palette.Backdrop, _neon, 0.75);
+        var ghost = Rgb.Lerp(_palette.Backdrop, _neon, 0.55);
         for (int i = 0; i < runes.Length; i++)
         {
             int rw = TextWidth.Of(runes[i]);
@@ -619,9 +658,11 @@ public sealed class App
                 c.Set(x + col, y, runes[i], color, bold: bold);
                 if (rw == 2) c.Set(x + col + 1, y, default(Rune), color, bold: bold);
             }
-            else if (age >= appearAt && runes[i].Value != ' ')
-                for (int k = 0; k < rw; k++)
-                    c.Set(x + col + k, y, Fx.Glyph(i * 31 + k + row * 997, tick), noiseColor, bold: bold);
+            else if (age >= appearAt)
+            {
+                c.Set(x + col, y, runes[i], ghost, bold: bold);
+                if (rw == 2) c.Set(x + col + 1, y, default(Rune), ghost, bold: bold);
+            }
             col += rw;
         }
         return true;
@@ -640,6 +681,118 @@ public sealed class App
             else if (r < 0.10) c.Recolor(x + col, y, Fx.Cyan);
         }
     }
+
+    private void DrawLower(Canvas c, int x, int y, int w, int h, double dt)
+    {
+        if (_eqOpen) DrawEqualizer(c, x, y, w, h, dt);
+        else DrawLyrics(c, x, y, w, h, dt);
+    }
+
+    // ── equalizer ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Ten vertical sliders around a 0 dB line, half-cell resolution, with the live
+    /// spectrum at each band's frequency glowing faintly behind them.
+    /// </summary>
+    private void DrawEqualizer(Canvas c, int x, int y, int w, int h, double dt)
+    {
+        bool on = _eq.Enabled;
+        string title = $"Ecualizador · {_eq.PresetName}" + (on ? "" : " · apagado");
+        if (_player.EqualizerError is { } err) title += $" · error: {err}";
+        var border = _fx ? Rgb.Lerp(PanelBorder, _neon, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
+        c.Box(x, y, w, h, title, border, on ? Accent : Theme.Muted);
+
+        int bands = Equalizer.Frequencies.Length;
+        int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
+        int sliderH = rows - 3; // gain values, sliders, frequency labels, preset strip
+        if (sliderH % 2 == 0) sliderH--; // odd height keeps the 0 dB line centered
+        if (sliderH < 3 || iw < bands * 3)
+        {
+            CenterText(c, ix, top + rows / 2, iw, "agranda la terminal para ver el ecualizador", Theme.Muted);
+            return;
+        }
+
+        // Sliders glide to new values.
+        double k = 1 - Math.Exp(-dt / 0.06);
+        for (int i = 0; i < bands; i++)
+        {
+            double target = on ? _eq.Gains[i] : 0;
+            _eqShown[i] += (target - _eqShown[i]) * k;
+            if (Math.Abs(target - _eqShown[i]) < 0.05) _eqShown[i] = target; else _animFast = true;
+        }
+        if (Now - _eqChangedAt < 0.3) _animFast = true;
+
+        int colW = iw / bands, ox = ix + (iw - colW * bands) / 2;
+        int sliderTop = top + 1, centerRow = sliderTop + (sliderH - 1) / 2;
+        int halfRange = Math.Max(1, Math.Min(centerRow - sliderTop, sliderTop + sliderH - 1 - centerRow));
+        var selection = Rgb.Lerp(_palette.Backdrop, Theme.Selection, 0.25);
+        var dim = on ? Theme.Track : Rgb.Lerp(Theme.Track, Theme.Border, 0.5);
+
+        for (int i = 0; i < bands; i++)
+        {
+            bool selected = i == _eqBand;
+            int cx = ox + i * colW, bx = cx + (colW - 2) / 2;
+            if (selected)
+                for (int r = top; r < top + rows - 1; r++) c.FillRow(cx, r, colW, selection);
+
+            // Live spectrum at this band's frequency, as a faint column behind the slider.
+            double level = Sample(_bars, BandPosition(Equalizer.Frequencies[i]));
+            int lit = (int)Math.Round(level * sliderH);
+            var glow = Rgb.Lerp(_palette.Backdrop, Accent, on ? 0.35 : 0.15);
+            for (int r = 0; r < lit; r++)
+            {
+                int ry = sliderTop + sliderH - 1 - r;
+                c.Set(bx - 1, ry, '░', glow, selected ? selection : null);
+                c.Set(bx + 2, ry, '░', glow, selected ? selection : null);
+            }
+
+            // 0 dB line, then the fill from it toward the gain in half-cell steps.
+            double g = _eqShown[i];
+            var lineColor = !on ? dim : Math.Abs(g) < 0.5 ? Theme.Muted : Accent;
+            c.Set(bx, centerRow, '━', lineColor);
+            c.Set(bx + 1, centerRow, '━', lineColor);
+            // Any non-zero gain shows at least half a cell, even on short terminals.
+            int halves = (int)Math.Round(Math.Abs(g) / Equalizer.MaxGain * halfRange * 2, MidpointRounding.AwayFromZero);
+            if (halves == 0 && Math.Abs(g) >= 0.5) halves = 1;
+            for (int u = 1; u <= halves; u++)
+            {
+                int offset = (u + 1) / 2;
+                bool half = u == halves && u % 2 == 1;
+                int ry = g > 0 ? centerRow - offset : centerRow + offset;
+                char ch = half ? (g > 0 ? '▄' : '▀') : '█';
+                double t = offset / (double)halfRange;
+                var color = !on ? Theme.Muted : u == halves && selected ? Fx.White : Rgb.Lerp(Accent, _neon, t);
+                c.Set(bx, ry, ch, color);
+                c.Set(bx + 1, ry, ch, color);
+            }
+
+            string value = on ? (_eq.Gains[i] > 0 ? "+" : "") + _eq.Gains[i].ToString("0") : "·";
+            CenterText(c, cx, top, colW, value, selected ? Accent : Theme.Muted);
+            int labelX = cx + (colW - Equalizer.Labels[i].Length) / 2;
+            c.Text(labelX, sliderTop + sliderH, Equalizer.Labels[i], selected ? Accent : Theme.Muted, bold: selected);
+        }
+
+        // Preset strip; the active one is highlighted, the preamp sits on the right.
+        int py = top + rows - 1, px = ix;
+        string preamp = on && _eq.Preamp < 0 ? $"pre {_eq.Preamp:0} dB" : "";
+        int stripEnd = ix + iw - preamp.Length - 2;
+        var names = Equalizer.Presets.Select(p => p.Name).Append(Equalizer.CustomName);
+        foreach (var name in names)
+        {
+            bool active = name == _eq.PresetName && on;
+            string label = active ? $"[{name}]" : name;
+            if (px + TextWidth.Of(label) > stripEnd) break;
+            px += c.Text(px, py, label, active ? Accent : Theme.Muted, bold: active) + 2;
+        }
+        if (preamp.Length > 0) c.Text(ix + iw - preamp.Length, py, preamp, Theme.Muted);
+    }
+
+    /// <summary>
+    /// Fractional analyzer band for a frequency. Bands are spaced by the square of
+    /// their index over half the sample rate (~48 kHz loopback), so invert that.
+    /// </summary>
+    private static double BandPosition(double hz) =>
+        Math.Clamp(Math.Sqrt(hz / 24000) * SpectrumAnalyzer.BandCount - 0.5, 0, SpectrumAnalyzer.BandCount - 1);
 
     // ── lyrics ─────────────────────────────────────────────────────────
 
@@ -770,7 +923,7 @@ public sealed class App
                         c.Recolor(cx + rowFill - 1, ry, Fx.White);
                         if (rowFill > 1) c.Recolor(cx + rowFill - 2, ry, Rgb.Lerp(Accent, Fx.White, 0.5));
                     }
-                    if (lineAge < 0.3) ScrambleIn(c, cx, ry, text, width, lineAge / 0.3, wi);
+                    if (lineAge < 0.3) RevealIn(c, cx, ry, width, lineAge / 0.3);
                 }
             }
             else
@@ -784,37 +937,29 @@ public sealed class App
         }
     }
 
-    /// <summary>Overlays noise on the not-yet-resolved tail of a freshly activated lyric row.</summary>
-    private void ScrambleIn(Canvas c, int x, int y, string text, int width, double progress, int seed)
+    /// <summary>Dims the not-yet-revealed tail of a freshly activated lyric row, with a white edge sweeping right.</summary>
+    private void RevealIn(Canvas c, int x, int y, int width, double progress)
     {
         _animFast = true;
-        int resolved = (int)(progress * width), col = 0, tick = (int)(Now * 20);
-        foreach (var rune in text.EnumerateRunes())
-        {
-            int rw = TextWidth.Of(rune);
-            if (rw == 0) continue;
-            if (col + rw > width) break;
-            if (col >= resolved && rune.Value != ' ')
-                for (int k = 0; k < rw; k++)
-                    c.Set(x + col + k, y, Fx.Glyph(col + k + seed * 53, tick), _neon, bold: true);
-            col += rw;
-        }
+        int revealed = (int)(progress * width);
+        var ghost = Rgb.Lerp(_palette.Backdrop, _neon, 0.4);
+        for (int col = revealed; col < width; col++) c.Recolor(x + col, y, ghost);
+        if (revealed < width) c.Recolor(x + revealed, y, Fx.White);
     }
 
-    /// <summary>Startup: a diagonal CRT wipe reveals the UI, with a band of noise glyphs on the leading edge.</summary>
+    /// <summary>Startup: a diagonal CRT wipe reveals the UI, its leading edge a band of white-to-neon light.</summary>
     private void DrawBoot(Canvas c, double progress)
     {
         _animFast = true;
         double eased = 1 - Math.Pow(1 - progress, 2);
         double span = c.Width + c.Height * 2 + 8;
         double front = eased * span;
-        int tick = (int)(Now * 25);
         for (int y = 0; y < c.Height; y++)
             for (int x = 0; x < c.Width; x++)
             {
                 double d = x + y * 2;
                 if (d > front) c.Reset(x, y);
-                else if (d > front - 6) c.Set(x, y, Fx.Glyph(x * 31 + y, tick), Rgb.Lerp(Fx.White, _neon, (front - d) / 6));
+                else if (d > front - 6) c.Recolor(x, y, Rgb.Lerp(Fx.White, _neon, (front - d) / 6));
             }
     }
 
@@ -1048,9 +1193,15 @@ public sealed class App
         }
     }
 
+    private static readonly (string Key, string Label)[] EqHints =
+    {
+        ("←/→", "banda"), ("↑/↓", "ganancia"), ("shift", "±3 dB"), ("0", "plano"), ("tab", "preset"), ("b", "on/off"),
+        ("e", "cerrar"), ("espacio", "play"), ("n/p", "sig/ant"),
+    };
+
     private static readonly (string Key, string Label)[] Hints =
     {
-        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"), ("f", "fx"), ("v", "visual"),
+        ("espacio", "play"), ("n/p", "sig/ant"), ("←/→", "±5s"), ("s", "aleatorio"), ("r", "repetir"), ("l", "letra"), ("e", "ecualizador"), ("f", "fx"), ("v", "visual"),
         ("+/-", "vol"), ("m", "mute"), ("enter", "reproducir"), (",/.", "desfase"), ("c", "actual"), ("j/k", "mover"),
     };
 
@@ -1061,7 +1212,7 @@ public sealed class App
         int quitX = c.Width - "q salir".Length - 1;
         c.Text(quitX, y, "q", Accent);
         c.Text(quitX + 2, y, "salir", Theme.Muted);
-        foreach (var (key, label) in Hints)
+        foreach (var (key, label) in _eqOpen ? EqHints : Hints)
         {
             if (x + key.Length + label.Length + 3 > quitX) break;
             x += c.Text(x, y, key, Accent) + 1;

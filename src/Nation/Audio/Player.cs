@@ -116,6 +116,37 @@ public sealed unsafe class Player : IDisposable
     public void AddVolume(int delta) => Cmd("add", "volume", delta.ToString());
     public void SetVolume(int volume) => MpvNative.SetPropertyString(_mpv, "volume", volume.ToString());
 
+    // Equalizer chain: one labeled mpv filter per band plus a preamp, installed the
+    // first time a non-flat curve is applied (so an unused EQ costs nothing). After
+    // that, gains change through af-command, which doesn't rebuild the audio chain.
+    private bool _eqInstalled;
+
+    /// <summary>Last mpv error from the equalizer, or null when it is working.</summary>
+    public string? EqualizerError { get; private set; }
+
+    public void ApplyEqualizer(Equalizer eq)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        double Gain(int i) => eq.Enabled ? eq.Gains[i] : 0;
+        if (_eqInstalled)
+        {
+            bool ok = true;
+            for (int i = 0; i < Equalizer.Frequencies.Length && ok; i++)
+                ok = MpvNative.Command(_mpv, "af-command", $"eq{i}", "g", Gain(i).ToString(inv)) >= 0;
+            if (ok) ok = MpvNative.Command(_mpv, "af-command", "eqpre", "volume", eq.Preamp.ToString(inv) + "dB") >= 0;
+            if (ok) { EqualizerError = null; return; }
+            // e.g. no audio chain yet (nothing loaded): fall back to setting the whole chain.
+        }
+        else if (eq.IsFlat) return;
+
+        var filters = Equalizer.Frequencies.Select((f, i) =>
+            string.Format(inv, "@eq{0}:lavfi=[equalizer=f={1}:t=o:w=1:g={2}]", i, f, Gain(i)));
+        string chain = string.Join(",", filters) + string.Format(inv, ",@eqpre:lavfi=[volume=volume={0}dB]", eq.Preamp);
+        int code = MpvNative.SetPropertyString(_mpv, "af", chain);
+        EqualizerError = code < 0 ? MpvNative.Error(code) : null;
+        _eqInstalled = code >= 0;
+    }
+
     public void PlayIndex(int index)
     {
         if (index < 0 || index >= _queue.Count) return;

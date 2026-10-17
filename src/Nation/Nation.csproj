@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Nation</RootNamespace>
-    <Version>0.8.0</Version>
+    <Version>0.9.0</Version>
     <!-- Lean runtime for a long-lived desktop app: no background GC thread, no ICU load. -->
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <InvariantGlobalization>true</InvariantGlobalization>

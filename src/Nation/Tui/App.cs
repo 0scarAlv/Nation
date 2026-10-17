@@ -19,6 +19,8 @@ public sealed class App
     public TauonCompatServer? Remote { get; init; }
     /// <summary>Windows media session (media keys, volume flyout); null when unavailable.</summary>
     public MediaSession? Media { get; init; }
+    /// <summary>Whether to keep session.json up to date (off for --snapshot).</summary>
+    public bool PersistSession { get; init; }
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private double _lastFrame;
 
@@ -37,6 +39,9 @@ public sealed class App
     // Cyberpunk effects (toggle with `f`): decode-in text, glitch bursts, neon border runner.
     private bool _fx = true;
     private Rgb _neon = Fx.Neon(ArtPalette.Default.Accent);
+    // Third hue (accent rotated -90°) and a hue wheel anchored on the cover, refreshed per frame.
+    private Rgb _third = Fx.Shift(ArtPalette.Default.Accent, 270);
+    private readonly Rgb[] _wheel = new Rgb[16];
     private double _glitchAt, _glitchUntil, _nextGlitch = 6;
     private int _glitchSeed;
     private double _bass;
@@ -70,6 +75,12 @@ public sealed class App
     private int _eqBand;
     private readonly double[] _eqShown = new double[Equalizer.Frequencies.Length];
     private double _eqChangedAt = double.NegativeInfinity;
+
+    // Resume: the saved track is selected (paused) on start, then seeked once mpv has loaded it.
+    private int _resumeIndex = -1;
+    private double _resumePosition;
+    private double _lastSessionSave;
+    private string? _savedPath;
     private const double BootTime = 0.9;
 
     private readonly float[] _bars = new float[SpectrumAnalyzer.BandCount];
@@ -105,6 +116,31 @@ public sealed class App
     }
 
     private double Now => _clock.Elapsed.TotalSeconds;
+
+    /// <summary>
+    /// Restores the last session's track and position (and volume unless the
+    /// command line set one). Call once after the queue is loaded.
+    /// </summary>
+    public void RestoreSession(bool volume)
+    {
+        if (Session.Load() is not { } session) return;
+        int index = -1;
+        for (int i = 0; i < _player.Queue.Count; i++)
+            if (string.Equals(_player.Queue[i].Path, session.Path, StringComparison.OrdinalIgnoreCase)) { index = i; break; }
+        if (volume) _player.SetVolume((int)Math.Round(session.Volume));
+        if (index < 0) return;
+        _resumeIndex = index;
+        _resumePosition = session.Position;
+        if (index > 0) _player.JumpTo(index);
+    }
+
+    /// <summary>Writes the current track/position; also called by Program on exit.</summary>
+    public void SaveSession()
+    {
+        if (_player.Current is not { } track || _resumeIndex >= 0) return;
+        new Session(track.Path, _player.Position, _player.Volume).Save();
+        _savedPath = track.Path;
+    }
 
     /// <summary>Returns false when the app should quit.</summary>
     public bool HandleKey(ConsoleKeyInfo key)
@@ -231,6 +267,20 @@ public sealed class App
         UpdatePalette(dt);
         UpdateSpectrum(dt);
         UpdateLyrics();
+        // Seek the restored track once mpv knows its duration (seeking earlier is ignored).
+        if (_resumeIndex >= 0 && _player.CurrentIndex == _resumeIndex && _player.Duration > 0)
+        {
+            if (_resumePosition > 1 && _resumePosition < _player.Duration - 2) _player.SeekAbsolute(_resumePosition);
+            _resumeIndex = -1;
+            _lastManualMove = DateTime.MinValue;
+        }
+        else if (_resumeIndex >= 0) _animFast = true;
+        // Save on track change and every 5 s while playing.
+        if (PersistSession && (_player.Current?.Path != _savedPath || (_player.Playing && now - _lastSessionSave > 5)))
+        {
+            _lastSessionSave = now;
+            SaveSession();
+        }
         UpdateBeat(now, dt);
         UpdateFx(now);
 
@@ -314,6 +364,8 @@ public sealed class App
     private void UpdateFx(double now)
     {
         _neon = Fx.Neon(Accent);
+        _third = Fx.Shift(Accent, 270);
+        for (int i = 0; i < _wheel.Length; i++) _wheel[i] = Fx.Shift(Accent, i * 300.0 / (_wheel.Length - 1));
         _bass = Math.Max(Sample(_bars, 0.5), Sample(_bars, 2));
         if (!_fx) return;
         // Ambient bursts only while playing (the loop is at 30 fps then anyway); paused stays idle.
@@ -402,6 +454,11 @@ public sealed class App
     // ── drawing ────────────────────────────────────────────────────────
 
     private Rgb Accent => _palette.Accent;
+    private Rgb Muted => _fx ? Rgb.Lerp(Theme.Muted, Accent, 0.3) : Theme.Muted;
+    private Rgb Track => _fx ? Rgb.Lerp(Theme.Track, Accent, 0.25) : Theme.Track;
+
+    /// <summary>Color from the cover-anchored hue wheel, x in [0, 1].</summary>
+    private Rgb Wheel(double x) => _wheel[Math.Clamp((int)Math.Round(x * (_wheel.Length - 1)), 0, _wheel.Length - 1)];
 
     private void DrawHeader(Canvas c)
     {
@@ -418,21 +475,22 @@ public sealed class App
         if (state != _stateText) { _stateText = state; _stateChangedAt = Now; }
         double stateAge = Now - _stateChangedAt;
         if (stateAge < DecodeTime) _animFast = true;
-        if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, Theme.Muted, false, stateAge, row: 5)) c.Text(x, 0, state, Theme.Muted);
+        var stateColor = !_fx ? Muted : _player.Idle ? Muted : _player.Paused ? Fx.Amber : _neon;
+        if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, stateColor, false, stateAge, row: 5)) c.Text(x, 0, state, stateColor);
         x += TextWidth.Of(state) + 3;
         if (_player.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
-        if (_player.Repeat) c.Text(x, 0, "⟳ repetir", Accent);
+        if (_player.Repeat) c.Text(x, 0, "⟳ repetir", _fx ? _third : Accent);
 
         string count = $"{_player.Queue.Count} pistas";
         int right = c.Width - count.Length - 1;
-        c.Text(right, 0, count, Theme.Muted);
+        c.Text(right, 0, count, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted);
 
         // Shade polls every 500 ms while connected, so a quiet API means it's gone.
         if (Remote is { } api)
         {
-            var (badge, color) = api.Error is { } err ? ($"API ✗ {err}", Theme.Muted)
+            var (badge, color) = api.Error is { } err ? ($"API ✗ {err}", Muted)
                 : DateTime.UtcNow - api.LastRequestUtc < TimeSpan.FromSeconds(4) ? ("⇄ shade", Accent)
-                : ($"API :{api.Port}", Theme.Muted);
+                : ($"API :{api.Port}", Muted);
             c.Text(right - TextWidth.Of(badge) - 3, 0, badge, color);
         }
     }
@@ -496,14 +554,14 @@ public sealed class App
             if (selected && _fx) c.Set(rx, ry, '▌', _neon, selection);
             else if (_fx && i == _prevCursor && trail < 1) c.Set(rx, ry, '▌', Rgb.Lerp(_neon, _palette.Backdrop, trail));
             if (playing) DrawMiniEq(c, rx + 1, ry);
-            c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), Theme.Muted);
+            c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), _fx ? Rgb.Lerp(Muted, _neon, 0.35) : Muted);
 
             string dur = FormatTime(t.Duration.TotalSeconds);
             int textX = rx + 5 + numWidth + 2;
             int textMax = inner - (textX - rx) - dur.Length - 2;
             int used = c.Text(textX, ry, t.Title, playing ? Accent : Theme.Text, bold: playing, maxWidth: textMax);
             if (used + 3 < textMax)
-                c.Text(textX + used, ry, " · " + t.Artist, Theme.Muted, maxWidth: textMax - used);
+                c.Text(textX + used, ry, " · " + t.Artist, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted, maxWidth: textMax - used);
             if (playing && _fx && _player.Playing)
             {
                 // A light band sweeps across the playing title every few seconds.
@@ -511,7 +569,7 @@ public sealed class App
                 for (int col = Math.Max(0, (int)sweep - 2); col <= sweep + 2 && col < used; col++)
                     c.Recolor(textX + col, ry, Rgb.Lerp(Accent, Fx.White, 1 - Math.Abs(col - sweep) / 3));
             }
-            c.Text(rx + inner - dur.Length - 1, ry, dur, Theme.Muted);
+            c.Text(rx + inner - dur.Length - 1, ry, dur, _fx ? Rgb.Lerp(Muted, _neon, 0.25) : Muted);
         }
     }
 
@@ -532,14 +590,14 @@ public sealed class App
         bool notice = Now - _visualChangedAt < 2;
         if (notice) _animSlow = true;
         string title = notice ? $"Reproduciendo · visual: {_visual.ToString().ToLowerInvariant()}" : "Reproduciendo";
-        var border = _fx ? Rgb.Lerp(PanelBorder, _neon, BeatStep * 0.8) : PanelBorder;
-        c.Box(x, y, w, h, title, border, notice ? Accent : Theme.Muted);
+        var border = _fx ? Rgb.Lerp(BorderIn(_neon), _neon, BeatStep * 0.8) : PanelBorder;
+        c.Box(x, y, w, h, title, border, notice ? Accent : Muted);
         if (_fx && _player.Playing) DrawBorderRunner(c, x, y, w, h);
         int ix = x + 3, iw = w - 6;
         var t = _player.Current;
         if (t is null)
         {
-            c.Text(ix, y + 2, "Nada en reproducción", Theme.Muted, maxWidth: iw);
+            c.Text(ix, y + 2, "Nada en reproducción", Muted, maxWidth: iw);
             return;
         }
 
@@ -553,10 +611,10 @@ public sealed class App
         DrawMarquee(c, ix, y + 2, iw, t.Title, Rgb.Lerp(from, Theme.Text, fade), bold: true, age, row: 0);
         DrawMarquee(c, ix, y + 3, iw, t.Artist, Rgb.Lerp(from, Accent, fade), bold: false, age, row: 1);
         string album = t.Year > 0 ? $"{t.Album} · {t.Year}" : t.Album;
-        if (!DrawDecoded(c, ix, y + 4, iw, album, Theme.Muted, false, age, row: 2))
-            c.Text(ix, y + 4, album, Rgb.Lerp(from, Theme.Muted, fade), maxWidth: iw);
-        if (!DrawDecoded(c, ix, y + 5, iw, t.QualityTag, Theme.Muted, false, age, row: 3))
-            c.Text(ix, y + 5, t.QualityTag, Rgb.Lerp(from, Theme.Muted, fade), maxWidth: iw);
+        if (!DrawDecoded(c, ix, y + 4, iw, album, Muted, false, age, row: 2))
+            c.Text(ix, y + 4, album, Rgb.Lerp(from, Muted, fade), maxWidth: iw);
+        if (!DrawDecoded(c, ix, y + 5, iw, t.QualityTag, Muted, false, age, row: 3))
+            c.Text(ix, y + 5, t.QualityTag, Rgb.Lerp(from, Muted, fade), maxWidth: iw);
         if (Glitching)
         {
             GlitchRow(c, ix, y + 2, iw, 0);
@@ -572,10 +630,10 @@ public sealed class App
         DrawProgress(c, ix, by, iw, dur > 0 ? pos / dur : 0);
         c.Text(ix, by + 1, FormatTime(pos), Theme.Text);
         string total = FormatTime(dur);
-        c.Text(ix + iw - total.Length, by + 1, total, Theme.Muted);
+        c.Text(ix + iw - total.Length, by + 1, total, Muted);
 
         string volLabel = _player.Muted ? "vol mute" : $"vol {_player.Volume,3:0}";
-        c.Text(ix, by + 3, volLabel, Theme.Muted);
+        c.Text(ix, by + 3, volLabel, Muted);
         // The bar glides to the new level and flashes after a change.
         double vol = _player.Muted ? 0 : _player.Volume;
         if (vol != _volTarget) { if (_volTarget >= 0) _volChangedAt = Now; _volTarget = vol; }
@@ -586,7 +644,7 @@ public sealed class App
         int volW = Math.Min(20, iw - 9), volFill = (int)Math.Round(_volShown / 100 * volW);
         var volColor = Rgb.Lerp(Accent, Fx.White, flash * 0.8);
         for (int i = 0; i < volW; i++)
-            c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i < volFill ? volColor : Theme.Track);
+            c.Set(ix + 9 + i, by + 3, i < volFill ? '■' : '·', i >= volFill ? Track : _fx ? Rgb.Lerp(Rgb.Lerp(Accent, _neon, i / (double)Math.Max(1, volW - 1)), Fx.White, flash * 0.8) : volColor);
         DrawLevelMeter(c, ix + 9 + volW + 3, by + 3, iw - (9 + volW + 3));
     }
 
@@ -596,7 +654,7 @@ public sealed class App
     private void DrawLevelMeter(Canvas c, int x, int y, int w)
     {
         if (w < 10) return;
-        c.Text(x, y, "nivel", Theme.Muted);
+        c.Text(x, y, "nivel", Muted);
         int mx = x + 6, mw = Math.Min(24, w - 6);
         double cells = Math.Clamp(_level * 1.6, 0, 1) * mw;
         int peak = (int)Math.Min(mw - 1, Math.Clamp(_levelPeak * 1.6, 0, 1) * mw);
@@ -607,11 +665,12 @@ public sealed class App
             int fill = Math.Clamp((int)Math.Round((cells - i) * 8), 0, 8);
             if (fill > 0) c.Set(mx + i, y, Horizontal[fill], color);
             else if (i == peak && _levelPeak > 0.01) c.Set(mx + i, y, '▏', Fx.White);
-            else c.Set(mx + i, y, '·', Theme.Track);
+            else c.Set(mx + i, y, '·', Track);
         }
     }
 
     private Rgb PanelBorder => _fx ? Rgb.Lerp(Theme.Border, Accent, 0.3) : Theme.Border;
+    private Rgb BorderIn(Rgb hue) => _fx ? Rgb.Lerp(Theme.Border, hue, 0.4) : Theme.Border;
 
     /// <summary>A bright packet with a fading tail that circles the panel border.</summary>
     private void DrawBorderRunner(Canvas c, int x, int y, int w, int h)
@@ -699,8 +758,8 @@ public sealed class App
         bool on = _eq.Enabled;
         string title = $"Ecualizador · {_eq.PresetName}" + (on ? "" : " · apagado");
         if (_player.EqualizerError is { } err) title += $" · error: {err}";
-        var border = _fx ? Rgb.Lerp(PanelBorder, _neon, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
-        c.Box(x, y, w, h, title, border, on ? Accent : Theme.Muted);
+        var border = _fx ? Rgb.Lerp(BorderIn(_third), _neon, Math.Clamp(1 - (Now - _eqChangedAt) / 0.3, 0, 1) * 0.8) : PanelBorder;
+        c.Box(x, y, w, h, title, border, on ? Accent : Muted);
 
         int bands = Equalizer.Frequencies.Length;
         int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
@@ -708,7 +767,7 @@ public sealed class App
         if (sliderH % 2 == 0) sliderH--; // odd height keeps the 0 dB line centered
         if (sliderH < 3 || iw < bands * 3)
         {
-            CenterText(c, ix, top + rows / 2, iw, "agranda la terminal para ver el ecualizador", Theme.Muted);
+            CenterText(c, ix, top + rows / 2, iw, "agranda la terminal para ver el ecualizador", Muted);
             return;
         }
 
@@ -726,7 +785,7 @@ public sealed class App
         int sliderTop = top + 1, centerRow = sliderTop + (sliderH - 1) / 2;
         int halfRange = Math.Max(1, Math.Min(centerRow - sliderTop, sliderTop + sliderH - 1 - centerRow));
         var selection = Rgb.Lerp(_palette.Backdrop, Theme.Selection, 0.25);
-        var dim = on ? Theme.Track : Rgb.Lerp(Theme.Track, Theme.Border, 0.5);
+        var dim = on ? Track : Rgb.Lerp(Track, Theme.Border, 0.5);
 
         for (int i = 0; i < bands; i++)
         {
@@ -748,7 +807,7 @@ public sealed class App
 
             // 0 dB line, then the fill from it toward the gain in half-cell steps.
             double g = _eqShown[i];
-            var lineColor = !on ? dim : Math.Abs(g) < 0.5 ? Theme.Muted : Accent;
+            var lineColor = !on ? dim : Math.Abs(g) < 0.5 ? Muted : Accent;
             c.Set(bx, centerRow, '━', lineColor);
             c.Set(bx + 1, centerRow, '━', lineColor);
             // Any non-zero gain shows at least half a cell, even on short terminals.
@@ -761,15 +820,15 @@ public sealed class App
                 int ry = g > 0 ? centerRow - offset : centerRow + offset;
                 char ch = half ? (g > 0 ? '▄' : '▀') : '█';
                 double t = offset / (double)halfRange;
-                var color = !on ? Theme.Muted : u == halves && selected ? Fx.White : Rgb.Lerp(Accent, _neon, t);
+                var color = !on ? Muted : u == halves && selected ? Fx.White : Rgb.Lerp(Accent, _neon, t);
                 c.Set(bx, ry, ch, color);
                 c.Set(bx + 1, ry, ch, color);
             }
 
             string value = on ? (_eq.Gains[i] > 0 ? "+" : "") + _eq.Gains[i].ToString("0") : "·";
-            CenterText(c, cx, top, colW, value, selected ? Accent : Theme.Muted);
+            CenterText(c, cx, top, colW, value, selected ? Accent : Muted);
             int labelX = cx + (colW - Equalizer.Labels[i].Length) / 2;
-            c.Text(labelX, sliderTop + sliderH, Equalizer.Labels[i], selected ? Accent : Theme.Muted, bold: selected);
+            c.Text(labelX, sliderTop + sliderH, Equalizer.Labels[i], selected ? Accent : Muted, bold: selected);
         }
 
         // Preset strip; the active one is highlighted, the preamp sits on the right.
@@ -782,9 +841,9 @@ public sealed class App
             bool active = name == _eq.PresetName && on;
             string label = active ? $"[{name}]" : name;
             if (px + TextWidth.Of(label) > stripEnd) break;
-            px += c.Text(px, py, label, active ? Accent : Theme.Muted, bold: active) + 2;
+            px += c.Text(px, py, label, active ? Accent : Muted, bold: active) + 2;
         }
-        if (preamp.Length > 0) c.Text(ix + iw - preamp.Length, py, preamp, Theme.Muted);
+        if (preamp.Length > 0) c.Text(ix + iw - preamp.Length, py, preamp, Muted);
     }
 
     /// <summary>
@@ -842,7 +901,7 @@ public sealed class App
             title += $" · desfase {_lyricOffset:+0.00;-0.00;0.00}s";
         else if (sheet is not null && !sheet.Synced && recentNudge)
             title += " · desfase no aplica";
-        c.Box(x, y, w, h, title, PanelBorder, Theme.Muted);
+        c.Box(x, y, w, h, title, BorderIn(_third), Muted);
 
         int ix = x + 2, iw = w - 4, top = y + 1, rows = h - 2;
         if (rows <= 0 || iw <= 4) return;
@@ -852,7 +911,7 @@ public sealed class App
             string msg = _lyricsLoading
                 ? $"{Spinner[(int)(Now * 12) % Spinner.Length]} buscando letra…"
                 : _player.Current is null ? "" : "sin letra para esta canción";
-            CenterText(c, ix, top + rows / 2, iw, msg, Theme.Muted);
+            CenterText(c, ix, top + rows / 2, iw, msg, Muted);
             return;
         }
 
@@ -914,7 +973,7 @@ public sealed class App
                 c.Text(cx, ry, text, Theme.Text, bold: true, maxWidth: iw);
                 var sung = _fx ? Rgb.Lerp(Accent, Fx.White, _beat * 0.4) : Accent;
                 for (int col = 0; col < rowFill; col++)
-                    c.Recolor(cx + col, ry, sung);
+                    c.Recolor(cx + col, ry, _fx ? Rgb.Lerp(Rgb.Lerp(Accent, _neon, col / (double)Math.Max(1, width - 1)), Fx.White, _beat * 0.4) : sung);
                 if (_fx)
                 {
                     // White-hot edge where the karaoke fill is advancing.
@@ -930,7 +989,8 @@ public sealed class App
             {
                 // Fade with distance from the active line; sung lines a little dimmer.
                 int distance = Math.Abs(line - Math.Max(active, 0));
-                var baseColor = line < active ? Rgb.Lerp(Theme.Muted, _palette.Backdrop, 0.35) : Theme.Muted;
+                var upcoming = _fx ? Rgb.Lerp(Muted, _third, 0.35) : Muted;
+                var baseColor = line < active ? Rgb.Lerp(Muted, _palette.Backdrop, 0.35) : upcoming;
                 var color = Rgb.Lerp(baseColor, _palette.Backdrop, Math.Min(distance, 6) / 9.0);
                 CenterText(c, ix, ry, iw, text.Length == 0 ? "♪" : text, color);
             }
@@ -1052,7 +1112,7 @@ public sealed class App
                 bool bottom = 2 * r + 1 >= mid - k && 2 * r + 1 < mid + k;
                 if (!top && !bottom) continue;
                 double dist = Math.Abs(r + 0.5 - h / 2.0) / Math.Max(1, h / 2.0);
-                c.Set(cx, y + r, top && bottom ? '█' : top ? '▀' : '▄', SpectrumColor(low, dist));
+                c.Set(cx, y + r, top && bottom ? '█' : top ? '▀' : '▄', SpectrumColor(low, dist, fromCenter));
             }
         }
     }
@@ -1084,7 +1144,7 @@ public sealed class App
                 }
                 if (bits == 0) continue;
                 double t = h == 1 ? 1 : (h - 1 - r) / (double)(h - 1);
-                c.Set(x + cx, y + r, (char)(0x2800 + bits), SpectrumColor(low, t));
+                c.Set(x + cx, y + r, (char)(0x2800 + bits), SpectrumColor(low, t, cx / (double)Math.Max(1, w - 1)));
             }
         }
     }
@@ -1142,18 +1202,20 @@ public sealed class App
                 int cy = y + h - 1 - r;
                 int fill = Math.Clamp(eighths - r * 8, 0, 8);
                 if (fill > 0)
-                    c.Set(cx, cy, Eighths[fill], SpectrumColor(low, h == 1 ? 1 : r / (double)(h - 1)));
+                    c.Set(cx, cy, Eighths[fill], SpectrumColor(low, h == 1 ? 1 : r / (double)(h - 1), b / (double)Math.Max(1, count - 1)));
                 else if (r == peakRow && peakRow > 0)
                     c.Set(cx, cy, '▁', peakColor);
             }
         }
     }
 
-    /// <summary>Bottom-to-top bar gradient: backdrop to accent, then (fx) on into the neon counterpart.</summary>
-    private Rgb SpectrumColor(Rgb low, double t)
+    /// <summary>Bar color: backdrop to accent bottom-to-top; with fx, a cover-anchored hue sweep across the width.</summary>
+    private Rgb SpectrumColor(Rgb low, double t, double x)
     {
         if (!_fx) return Rgb.Lerp(low, Accent, t);
-        var color = t < 0.6 ? Rgb.Lerp(low, Accent, t / 0.6) : Rgb.Lerp(Accent, _neon, (t - 0.6) / 0.4);
+        // Hue sweeps across the width (cover hue at the left/center), brightening toward the top.
+        var hue = Wheel(x);
+        var color = t < 0.7 ? Rgb.Lerp(Rgb.Lerp(_palette.Backdrop, hue, 0.5), hue, t / 0.7) : Rgb.Lerp(hue, Fx.White, (t - 0.7) / 0.3 * 0.35);
         return Rgb.Lerp(color, Fx.White, _beat * 0.35);
     }
 
@@ -1167,7 +1229,7 @@ public sealed class App
         {
             if (i < full) c.Set(x + i, y, '━', Accent);
             else if (i == full && cells - full >= 0.5) c.Set(x + i, y, '╸', Accent);
-            else c.Set(x + i, y, '─', Theme.Track);
+            else c.Set(x + i, y, '─', Track);
         }
     }
 
@@ -1183,7 +1245,7 @@ public sealed class App
         _ripples.RemoveAll(t0 => (Now - t0) * 45 > end + 4);
         for (int i = 0; i < w; i++)
         {
-            if (i > end) { c.Set(x + i, y, '─', Theme.Track); continue; }
+            if (i > end) { c.Set(x + i, y, '─', Track); continue; }
             var color = Rgb.Lerp(Accent, _neon, w <= 1 ? 0 : i / (double)(w - 1));
             double d = Math.Abs(i - pulse);
             foreach (var t0 in _ripples) d = Math.Min(d, Math.Abs(i - (end - (Now - t0) * 45)));
@@ -1211,12 +1273,14 @@ public sealed class App
         // Quit hint is pinned to the right so it never gets cut off.
         int quitX = c.Width - "q salir".Length - 1;
         c.Text(quitX, y, "q", Accent);
-        c.Text(quitX + 2, y, "salir", Theme.Muted);
+        c.Text(quitX + 2, y, "salir", Muted);
+        int hint = 0;
         foreach (var (key, label) in _eqOpen ? EqHints : Hints)
         {
             if (x + key.Length + label.Length + 3 > quitX) break;
-            x += c.Text(x, y, key, Accent) + 1;
-            x += c.Text(x, y, label, Theme.Muted) + 2;
+            var keyColor = !_fx ? Accent : (hint++ % 3) switch { 0 => Accent, 1 => _neon, _ => _third };
+            x += c.Text(x, y, key, keyColor) + 1;
+            x += c.Text(x, y, label, Muted) + 2;
         }
     }
 

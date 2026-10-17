@@ -147,6 +147,13 @@ public sealed unsafe class Player : IDisposable
         _eqInstalled = code >= 0;
     }
 
+    /// <summary>Switches to a queue entry without changing pause state (used to restore the last session).</summary>
+    public void JumpTo(int index)
+    {
+        if (index < 0 || index >= _queue.Count) return;
+        Cmd("playlist-play-index", index.ToString());
+    }
+
     public void PlayIndex(int index)
     {
         if (index < 0 || index >= _queue.Count) return;

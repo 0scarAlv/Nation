@@ -10,6 +10,7 @@ public static class Fx
 {
     public static readonly Rgb White = Rgb.Hex(0xF4F7FF);
     public static readonly Rgb Cyan = Rgb.Hex(0x00F0FF);
+    public static readonly Rgb Amber = Rgb.Hex(0xFFB13B);
     private static readonly Rgb FallbackNeon = Rgb.Hex(0xFF2BD6);
 
     // Half-width katakana, hex and symbols: all one column wide, so scrambled text keeps its layout.
@@ -34,6 +35,14 @@ public static class Fx
         var (h, s, v) = ToHsv(accent);
         if (s < 0.15) return FallbackNeon; // grey covers have no hue to rotate
         return FromHsv((h + 150) % 360, Math.Max(s, 0.75), Math.Max(v, 0.95));
+    }
+
+    /// <summary>Accent with its hue rotated by `degrees`, kept vivid; grey accents rotate from magenta.</summary>
+    public static Rgb Shift(Rgb accent, double degrees)
+    {
+        var (h, s, v) = ToHsv(accent);
+        if (s < 0.15) { h = 300; s = 0.7; }
+        return FromHsv(((h + degrees) % 360 + 360) % 360, Math.Max(s, 0.6), Math.Max(v, 0.9));
     }
 
     private static (double H, double S, double V) ToHsv(Rgb c)

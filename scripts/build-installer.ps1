@@ -1,5 +1,5 @@
 # Publishes a self-contained build (no .NET install needed) and compiles the Inno Setup installer.
-# Output: dist\NationSetup-<version>.exe
+# Output: Downloads\Melomano\NationSetup-<version>.exe
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $env:PATH = "C:\Program Files\dotnet;" + $env:PATH
@@ -25,8 +25,10 @@ if (-not $iscc) { throw "Inno Setup 6 (ISCC.exe) not found" }
 & $iscc /Q "/DMyAppVersion=$version" (Join-Path $root 'installer\Nation.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
-# Oscar installs from Downloads; always drop the fresh installer there.
+# Oscar keeps every installer in Downloads\Melomano; always drop the fresh one there.
 $downloads = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+$target = Join-Path $downloads 'Melomano'
+New-Item -ItemType Directory -Force $target | Out-Null
 $setup = Join-Path $root "dist\NationSetup-$version.exe"
-Move-Item $setup $downloads -Force
-Write-Host "Installer: $(Join-Path $downloads "NationSetup-$version.exe")"
+Move-Item $setup $target -Force
+Write-Host "Installer: $(Join-Path $target "NationSetup-$version.exe")"

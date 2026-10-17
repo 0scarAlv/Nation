@@ -62,7 +62,9 @@ if (remote is not null)
 using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null;
 if (media is not null) media.OnCommand = RunCommand;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, PersistSession = snapshotPath is null };
+// Pick up where the last run left off (an explicit --volume wins over the saved one).
+if (snapshotPath is null) app.RestoreSession(volume: volume is null);
 
 var frame = TimeSpan.FromMilliseconds(20);
 
@@ -104,5 +106,6 @@ using (var terminal = new Terminal())
         terminal.Present(canvas);
         WaitHandle.WaitAny(wakeupArray, app.NextFrameDelay);
     }
+    app.SaveSession();
 }
 return 0;

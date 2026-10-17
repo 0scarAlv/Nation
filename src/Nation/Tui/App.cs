@@ -927,7 +927,10 @@ public sealed class App
         var t = Playback.Current;
         if (t is null)
         {
-            c.Text(ix, y + 2, _externalMode ? $"{External?.AppName} no está mostrando ninguna canción" : "Nada en reproducción", Muted, maxWidth: iw);
+            string empty = _externalMode ? $"{External?.AppName} no está mostrando ninguna canción"
+                : _player.Queue.Count == 0 ? "No hay música en tu carpeta Música: abre Spotify, YouTube Music u otra app, o pasa una carpeta (nation \"D:\\Musica\")"
+                : "Nada en reproducción";
+            c.Text(ix, y + 2, empty, Muted, maxWidth: iw);
             return;
         }
 

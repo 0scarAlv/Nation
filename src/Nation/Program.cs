@@ -39,7 +39,8 @@ if (args.Contains("--sessions"))
 if (paths.Count == 0) paths.Add(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic));
 
 var tracks = TrackScanner.Scan(paths);
-if (tracks.Count == 0)
+// No local music is fine: Nation can still skin Spotify or a browser. Without that either, there's nothing to do.
+if (tracks.Count == 0 && (!external || snapshotPath is not null && !externalSnapshot))
 {
     Console.Error.WriteLine("No se encontraron archivos de audio en: " + string.Join(", ", paths));
     return 1;
@@ -61,7 +62,7 @@ using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null
 var sources = SourceSettings.Load();
 using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;

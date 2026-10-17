@@ -4,7 +4,17 @@ Reproductor de música para terminal, estilo lazygit. C# (.NET 8) + libmpv.
 
 Formatos: FLAC, Opus, MP3, M4A/MP4 (solo audio), OGG, WAV, WavPack, APE — todo lo que decodifique ffmpeg.
 
-## Setup
+## Instalar (Windows 10/11, 64 bits)
+
+1. Descarga `NationSetup-<versión>.exe` desde [Releases](https://github.com/0scarAlv/Nation/releases).
+2. Ejecútalo. No pide permisos de administrador; se instala en `%LOCALAPPDATA%\Programs\Nation` y agrega `nation` al PATH.
+3. Abre una terminal (Windows Terminal recomendado) y escribe `nation`. Sin argumentos toca tu carpeta **Música**; también puedes pasarle carpetas o archivos: `nation "D:\Musica"`.
+
+**Aviso de Windows**: el instalador todavía no está firmado. SmartScreen puede mostrar *"Windows protegió tu PC"* → **Más información** → **Ejecutar de todas formas**. Si tienes **Smart App Control** activado, Windows lo bloqueará sin opción; la firma digital está pendiente para una próxima versión.
+
+Lo primero: un toque de **`shift`** abre el menú con todos los comandos. **`o`** elige de dónde toma la música (tu biblioteca, Spotify, el navegador…), **`v`** cambia el visualizador.
+
+## Desarrollo
 
 ```powershell
 ./scripts/fetch-libmpv.ps1        # descarga libmpv-2.dll a native/
@@ -98,4 +108,10 @@ El pie solo muestra `shift comandos`: **un toque de `shift`** (presionar y solta
 - Sincronización automática de letras planas (alineación con Whisper) → `.lrc` junto al archivo
 5. Carátula Sixel/Kitty
 - ~~Modo skin para Spotify / YouTube Music vía SMTC~~
-- 1.0: playlists propias, navegación entre ellas estilo lf
+- ~~1.0: primera versión pública~~
+- 1.1: playlists propias, navegación entre ellas estilo lf
+- Firma digital del instalador y el ejecutable (SignPath o Certum)
+
+## Licencia
+
+[GPL-3.0](LICENSE). Nation empaqueta libmpv compilado con componentes GPL; ver [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

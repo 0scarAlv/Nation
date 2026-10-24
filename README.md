@@ -23,7 +23,7 @@ dotnet run --project src/Nation -- "C:\ruta\a\musica"
 
 Instalador: `./scripts/build-installer.ps1` → `Descargas\Melomano\NationSetup-<versión>.exe` (self-contained, sin admin, agrega `nation` al PATH del usuario). Requiere Inno Setup 6.
 
-Arranca en pausa donde te quedaste: la última canción, en el segundo en que la dejaste, con el mismo volumen (se guarda cada 5 s y al salir en `%LOCALAPPDATA%\Nation\session.json`, así que sobrevive a cerrar la ventana; un `--volume` explícito tiene prioridad). La primera vez arranca con la primera canción. Sin argumentos usa la carpeta Música del usuario. `--shuffle` arranca en aleatorio. `--volume <0-100>` volumen inicial. `--offline` nunca consulta LRCLIB. `--no-api` / `--api-port <n>` controlan la API remota. `--no-media-keys` desactiva la integración con Windows. `--skin` arranca siguiendo a otra app (ver *Modo skin*), `--no-external` lo desactiva y `--sessions` lista las sesiones de medios que ve Windows. `--snapshot <archivo>` vuelca un frame como texto (debug, en mute).
+Arranca en pausa donde te quedaste: la última canción, en el segundo en que la dejaste, con el mismo volumen (se guarda cada 5 s y al salir en `%LOCALAPPDATA%\Nation\session.json`, así que sobrevive a cerrar la ventana; un `--volume` explícito tiene prioridad). La primera vez arranca con la primera canción. Sin argumentos usa la carpeta Música del usuario. `--shuffle` arranca en aleatorio. `--volume <0-100>` volumen inicial. `--offline` nunca consulta LRCLIB. `--no-api` / `--api-port <n>` controlan la API remota. `--no-media-keys` desactiva la integración con Windows. `--skin` arranca siguiendo a otra app (ver *Modo skin*), `--no-external` lo desactiva y `--sessions` lista las sesiones de medios que ve Windows. `--snapshot <archivo>` vuelca un frame como texto (debug, en mute). `NATION_MPV_LOG=<archivo>` escribe el log de mpv (útil si una canción de YouTube Music no carga).
 
 ## Visual
 
@@ -39,12 +39,23 @@ Arranca en pausa donde te quedaste: la última canción, en el segundo en que la
 
 ## Búsqueda, cola y listas
 
-El panel izquierdo tiene tres pestañas: **Cola** (`1`, el orden real en que va a sonar), **Biblioteca** (`2`, todo lo escaneado) y **Listas** (`3`, tus playlists). `tab` / `shift+tab` también cambian. Si tenías el panel oculto (`b`), cualquiera de estas teclas o `/` lo vuelve a mostrar.
+El panel izquierdo tiene cuatro pestañas: **Cola** (`1`, el orden real en que va a sonar), **Biblioteca** (`2`, todo lo escaneado), **Listas** (`3`, tus playlists) y **YouTube** (`4`, ver [YouTube Music](#youtube-music)). `tab` / `shift+tab` también cambian. Si tenías el panel oculto (`b`), cualquiera de estas teclas o `/` lo vuelve a mostrar.
 
 - **Búsqueda dinámica (`/`)**: los resultados se actualizan con cada tecla. Cada palabra que escribes tiene que aparecer en el título, el artista o el álbum, así que entre más escribes más se afina (`arctic 505`); no distingue mayúsculas ni acentos (`cancion` encuentra *Canción*). Primero salen los títulos que empiezan como lo escribiste, después las palabras que empiezan así, después el resto; lo que coincide se ilumina. `↑`/`↓` eligen mientras escribes, `enter` deja los resultados y devuelve las teclas a la lista, `esc` borra la búsqueda. Buscar **no recorta la cola**: `enter` sobre un resultado lo reproduce y después sigue toda la biblioteca (o toda la lista) en su orden, como si no hubieras buscado.
 - **A continuación (`x`)**: mete la canción seleccionada justo después de la que suena, detrás de las que ya estaban esperando, sin tocar nada más; `X` la pone primera en la fila. En la Cola las que esperan llevan un `+` (y la pestaña dice cuántas, `Cola +3`); en Biblioteca y Listas también se marcan. Una vez que suenan salen de la cola solas. Sobreviven a cambiar de lista, al aleatorio (siempre van antes del resto mezclado) y a cerrar Nation.
 - **Reordenar (`J`/`K`, o `shift+↑`/`↓`)**: en la Cola sube o baja la canción seleccionada una posición, entre cualquiera de las que vienen después de la actual; dentro de una lista, reordena la lista. `d` quita la canción de la cola (o de la lista). Todo se hace sobre el propio playlist de mpv, así que la canción que suena nunca se corta y el paso a la siguiente sigue sin pausa.
 - **Listas con nombre**: en Listas, `a` crea una, `R` la renombra, `d` dos veces la borra, `enter` la abre (`h`/`esc` vuelve) y `x` manda la lista entera a "a continuación". En cualquier canción, `a` abre "Agregar a…" para elegir la lista o crear una nueva ahí mismo. `enter` sobre una canción de una lista reproduce esa lista desde ahí (el encabezado muestra `≡ nombre`); `enter` en la Biblioteca vuelve a la biblioteca completa. Se guardan como `.m3u8` normales (abren en cualquier reproductor) en `%LOCALAPPDATA%\Nation\playlists`; si un archivo de la lista no está, la lista lo conserva y lo muestra como *archivo no encontrado*.
+
+## YouTube Music
+
+La pestaña **YouTube** (`4`) trae YouTube Music *dentro* de Nation: sus canciones suenan en el mismo motor que tus archivos, así que la cola, `x`, `J`/`K`, el aleatorio, el ecualizador, los visualizadores y las letras (LRCLIB) funcionan igual, y puedes mezclarlas con canciones locales en tus listas.
+
+- **Buscar (`/`)**: busca canciones en todo YouTube Music, sin cuenta (los resultados llegan cuando dejas de teclear un momento). `enter` sobre un resultado lo reproduce y **sigue con su radio** de YouTube Music, como en la app: la búsqueda nunca se vuelve la cola. `x` la manda a "a continuación" y `a` la guarda en una lista tuya.
+- **Tu biblioteca**: con sesión iniciada, la pestaña muestra *Me gusta* y tus listas guardadas. `enter` abre una (se cargan todas sus canciones, aunque sean miles), `x` manda la lista entera a "a continuación", `a` la copia a una lista local y `R` recarga. Desde YouTube Music las listas son de solo lectura; para editarlas copia sus canciones a una lista tuya.
+- **Iniciar sesión (`i`)**: YouTube Music no tiene API pública, así que Nation usa la misma API interna que la página web (como `ytmusicapi`), con la cookie de tu navegador. En music.youtube.com con tu cuenta: `F12` → pestaña **Red** → filtra `browse` → recarga (`F5`) → clic en una petición → **Encabezados de solicitud** → copia el valor de `cookie`. Vuelve a Nation y pulsa `i`: la lee del portapapeles, comprueba que Google la acepte y la guarda **cifrada para tu usuario de Windows** (DPAPI) en `%LOCALAPPDATA%\Nation\youtube.cookie`. Esa cookie es una llave de tu cuenta de Google: no la compartas. Caduca cada cierto tiempo; cuando pase, Nation lo dice y se repite el paso. El menú (`shift`) tiene "cerrar sesión", que la borra.
+- **yt-dlp**: es lo que convierte una canción de YouTube Music en audio. Si no lo tienes en el PATH, `y` en la pestaña descarga la versión oficial (desempaquetada, ~30 MB; arranca bastante más rápido que el `yt-dlp.exe` de un solo archivo) a `%LOCALAPPDATA%\Nation\bin\yt-dlp`, y Nation la actualiza sola cada semana si hay versión nueva. Sin cuenta Premium el audio es Opus de ~130 kbps.
+- **Tiempos**: resolver una canción toma unos segundos (el título dice *preparando…*). Mientras suena una, Nation ya resuelve la siguiente, así que el paso entre canciones es casi instantáneo; y el resultado sobre el que dejas el cursor se va preparando antes de que des `enter`. Si tienes Deno o Node, yt-dlp los usa cuando YouTube lo exige.
+- **Aviso**: reproducir con yt-dlp va contra los términos de servicio de YouTube y puede romperse cuando Google cambia algo (yt-dlp suele arreglarlo en días; por eso la actualización semanal). Úsalo con tu propia cuenta y bajo tu responsabilidad.
 
 ## Ecualizador
 
@@ -104,12 +115,13 @@ El pie solo muestra `shift comandos`: **un toque de `shift`** (presionar y solta
 | `b` | mostrar / ocultar la lista de canciones (se recuerda en `%LOCALAPPDATA%\Nation\ui.json`) |
 | `l` · `e` · `v` · `f` | letra · ecualizador · visualizador (8 modos) · efectos |
 | `,` / `.` | desfase de letra −/+ 0.25 s |
-| `1` `2` `3` · `tab` | cola · biblioteca · listas |
+| `1` `2` `3` `4` · `tab` | cola · biblioteca · listas · YouTube Music |
 | `/` | búsqueda dinámica (`enter` listo, `esc` borra) |
 | `j`/`k`, `↑`/`↓`, `g`/`G`, `enter`, `c` | lista: mover, inicio/final, reproducir, ir a la actual |
 | `x` · `X` | a continuación (al final de las que esperan · primera) |
 | `J` / `K` | subir / bajar la canción en la cola o en una lista |
 | `d` · `a` | quitar de la cola/lista · agregar a una lista (en Listas: `a` nueva, `R` renombrar, `d d` borrar) |
+| `i` · `y` | (pestaña YouTube) iniciar sesión con la cookie del portapapeles · descargar yt-dlp |
 | `shift` (solo) · `?` · `F1` | menú de comandos |
 | `q` | salir |
 
@@ -124,6 +136,8 @@ El pie solo muestra `shift comandos`: **un toque de `shift`** (presionar y solta
 - ~~Modo skin para Spotify / YouTube Music vía SMTC~~
 - ~~1.0: primera versión pública~~
 - ~~1.1: búsqueda dinámica, cola "a continuación" reordenable, playlists propias~~
+- ~~1.2: YouTube Music dentro de Nation (búsqueda, radio, tu biblioteca y tus listas)~~
+- Spotify: tus listas en Nation, reproduciendo en la app de Spotify (Web API, requiere Premium)
 - Firma digital del instalador y el ejecutable (SignPath o Certum)
 
 ## Licencia

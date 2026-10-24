@@ -39,7 +39,24 @@ public static class CoverArt
     {
         // Another app's track: the cover came with its media session.
         if (track.IsExternal) return (track.CoverKey ?? "", track.Cover);
+        if (track.IsStream) return track.CoverUrl is { } url ? (url, Download(url)) : ("", null);
         return FindCover(track.Path);
+    }
+
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
+    // Thumbnails are asked for by the palette, the media flyout and Shade: download once.
+    private static readonly ConcurrentDictionary<string, byte[]?> Downloads = new();
+
+    /// <summary>Callers are already off the UI thread (palette task, media session, API server).</summary>
+    private static byte[]? Download(string url)
+    {
+        if (Downloads.TryGetValue(url, out var cached)) return cached;
+        byte[]? bytes;
+        try { bytes = Http.GetByteArrayAsync(url).GetAwaiter().GetResult(); }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { return null; } // retry next time
+        if (Downloads.Count > 64) Downloads.Clear();
+        Downloads[url] = bytes;
+        return bytes;
     }
 
     private static (string Key, byte[]? Bytes) FindCover(string trackPath)

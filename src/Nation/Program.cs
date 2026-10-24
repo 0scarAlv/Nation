@@ -3,6 +3,7 @@ using Nation.External;
 using Nation.Library;
 using Nation.Lyrics;
 using Nation.Remote;
+using Nation.Streaming;
 using Nation.Tui;
 
 // Usage: nation [files|folders...] [--shuffle] [--volume <0-100>] [--offline] [--no-api] [--api-port <n>] [--no-media-keys] [--skin] [--no-external] [--sessions] [--snapshot <file> [--external] [--snapshot-keys <keys>]]
@@ -46,6 +47,8 @@ if (tracks.Count == 0 && (!external || snapshotPath is not null && !externalSnap
     return 1;
 }
 
+// mpv's ytdl hook finds yt-dlp on PATH, including Nation's own copy (downloaded on request).
+YtDlp.PrepareEnvironment();
 using var player = new Player();
 player.Enqueue(tracks);
 if (shuffle) player.ToggleShuffle();
@@ -62,7 +65,9 @@ using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null
 var sources = SourceSettings.Load();
 using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Playlists = PlaylistStore.Load(player.Library), Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
+using var youtube = new YouTubeMusic();
+if (snapshotPath is null) YtDlp.UpdateInBackground();
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Playlists = PlaylistStore.Load(player.Library), YouTube = youtube, Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;

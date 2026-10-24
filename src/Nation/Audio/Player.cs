@@ -45,7 +45,13 @@ public sealed unsafe class Player : IPlayback, IDisposable
         Opt("pause", "yes");
         Opt("gapless-audio", "weak");
         Opt("volume-max", "100");
+        // YouTube Music links: mpv's ytdl hook resolves them with yt-dlp (audio only).
+        Opt("ytdl", "yes");
+        Opt("ytdl-format", "bestaudio/best");
+        if (Streaming.YtDlp.JsRuntimeOption() is { } js) Opt("ytdl-raw-options", js);
 
+        // Diagnostics: NATION_MPV_LOG=<file> writes mpv's own log (ytdl hook, decoders, network).
+        if (Environment.GetEnvironmentVariable("NATION_MPV_LOG") is { Length: > 0 } log) Opt("log-file", log);
         Check(MpvNative.Initialize(_mpv), "mpv_initialize");
     }
 
@@ -87,6 +93,7 @@ public sealed unsafe class Player : IPlayback, IDisposable
     {
         _index = (int)GetInt64("playlist-pos", -1);
         if (_index != _prunedAt) Prune();
+        PreloadNext();
         _paused = GetFlag("pause");
         _muted = GetFlag("mute");
         _idle = GetFlag("idle-active");
@@ -179,7 +186,55 @@ public sealed unsafe class Player : IPlayback, IDisposable
         public Track Track { get; } = track;
         /// <summary>Added by the user with "a continuación" (x), as opposed to coming from the list being played.</summary>
         public bool Queued { get; set; } = queued;
+        /// <summary>What mpv's playlist holds for it: the file, the song's page URL, or a direct audio URL.</summary>
+        public string PlayPath { get; set; } = track.Path;
+        /// <summary>When PlayPath is a direct audio URL: until when Google honors it.</summary>
+        public DateTime DirectUntil { get; set; }
+        public bool Direct => !ReferenceEquals(PlayPath, Track.Path) && PlayPath != Track.Path;
     }
+
+    private readonly Streaming.StreamResolver _resolver = new();
+
+    /// <summary>Starts resolving a YouTube Music song before it's played (e.g. the search result under the cursor).</summary>
+    public void Prefetch(Track track)
+    {
+        if (track.IsStream) _resolver.Request(track.Path);
+    }
+
+    /// <summary>A file, or a streamed song whose direct audio URL is ready (it starts at once).</summary>
+    public bool IsResolved(Track track) => !track.IsStream || _resolver.TryGet(track.Path) is not null;
+
+    public bool IsResolving(Track track) => track.IsStream && _resolver.IsPending(track.Path);
+
+    /// <summary>
+    /// mpv's ytdl hook runs yt-dlp when a YouTube Music link starts (≈5 s of silence), so
+    /// the next song is resolved while this one plays and its entry swapped for the direct
+    /// audio URL. Our mirror keeps the Track (page URL) for everything else.
+    /// </summary>
+    private void PreloadNext()
+    {
+        int next = _index + 1;
+        if (_index < 0 || next >= _entries.Count || !_entries[next].Track.IsStream) return;
+        var entry = _entries[next];
+        // A direct URL left waiting past its expiry would fail: back to the page URL and resolve again.
+        if (entry.Direct && entry.DirectUntil <= DateTime.UtcNow) SetPlayPath(next, entry.Track.Path, default);
+        if (entry.Direct) return;
+        if (_resolver.TryGet(entry.Track.Path, out var until) is { } direct) SetPlayPath(next, direct, until);
+        else _resolver.Request(entry.Track.Path);
+    }
+
+    /// <summary>Swaps what mpv will open for an entry that isn't playing (remove, then insert at the same index).</summary>
+    private void SetPlayPath(int index, string path, DateTime until)
+    {
+        Cmd("playlist-remove", index.ToString());
+        Cmd("loadfile", path, "insert-at", index.ToString());
+        _entries[index].PlayPath = path;
+        _entries[index].DirectUntil = until;
+    }
+
+    /// <summary>The direct audio URL when it's already resolved, so the song starts at once.</summary>
+    private string StartPath(Track track) =>
+        track.IsStream && _resolver.TryGet(track.Path) is { } direct ? direct : track.Path;
 
     /// <summary>Read-only Track view over the entries, so callers index the queue like a list of tracks.</summary>
     private sealed class QueueView(List<Entry> entries) : IReadOnlyList<Track>
@@ -312,7 +367,10 @@ public sealed unsafe class Player : IPlayback, IDisposable
             int from = _entries.IndexOf(pending[k]), t = _entries.IndexOf(target);
             Move(from, (from < t ? t : t + 1) + k);
         }
-        Cmd("playlist-play-index", _entries.IndexOf(target).ToString());
+        int at = _entries.IndexOf(target);
+        if (target.Track.IsStream && !target.Direct && at != _index && _resolver.TryGet(target.Track.Path, out var until) is { } direct)
+            SetPlayPath(at, direct, until);
+        Cmd("playlist-play-index", at.ToString());
         MpvNative.SetPropertyString(_mpv, "pause", "no");
         SyncIndex();
         Version++;
@@ -344,12 +402,13 @@ public sealed unsafe class Player : IPlayback, IDisposable
 
         var pending = PendingEntries();
         var start = list[index];
-        Cmd("loadfile", start.Path, "replace"); // the playlist is now just this song, already current
+        string startPath = StartPath(start);
+        Cmd("loadfile", startPath, "replace"); // the playlist is now just this song, already current
         if (play) MpvNative.SetPropertyString(_mpv, "pause", "no");
         _context = list.ToList();
         ContextName = name;
         _entries.Clear();
-        _entries.Add(new Entry(start));
+        _entries.Add(new Entry(start) { PlayPath = startPath });
         if (Shuffled)
             Rebuild(new List<Entry>(), pending.Concat(Shuffle(_context.Where((_, i) => i != index))).ToList());
         else
@@ -361,6 +420,16 @@ public sealed unsafe class Player : IPlayback, IDisposable
     public void RenameContext(string from, string to)
     {
         if (ContextName == from) ContextName = to;
+    }
+
+    /// <summary>Adds songs to the end of the list being played (a song's radio arriving after it started).</summary>
+    public void AppendToContext(IReadOnlyList<Track> tracks)
+    {
+        if (tracks.Count == 0) return;
+        _context.AddRange(tracks);
+        LoadList(tracks, "append");
+        _entries.AddRange(tracks.Select(t => new Entry(t)));
+        Version++;
     }
 
     private bool SameContext(IReadOnlyList<Track> list)
@@ -479,7 +548,7 @@ public sealed unsafe class Player : IPlayback, IDisposable
         if (GetInt64("playlist-count", -1) != _entries.Count) return -1;
         int bad = 0;
         for (int i = 0; i < _entries.Count; i++)
-            if (!string.Equals(GetString($"playlist/{i}/filename"), _entries[i].Track.Path, StringComparison.OrdinalIgnoreCase)) bad++;
+            if (!string.Equals(GetString($"playlist/{i}/filename"), _entries[i].PlayPath, StringComparison.OrdinalIgnoreCase)) bad++;
         return bad;
     }
 

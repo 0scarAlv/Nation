@@ -23,6 +23,10 @@ public sealed record Track(
     public byte[]? Cover { get; init; }
     public string? CoverKey { get; init; }
 
+    /// <summary>Streamed song (YouTube Music): Path is its URL, the cover comes from CoverUrl.</summary>
+    public bool IsStream => Streaming.StreamTracks.IsStream(Path);
+    public string? CoverUrl { get; init; }
+
     /// <summary>Short quality tag like "FLAC 24/96" or "OPUS 160k".</summary>
     public string QualityTag =>
         BitsPerSample > 0 && SampleRate > 0

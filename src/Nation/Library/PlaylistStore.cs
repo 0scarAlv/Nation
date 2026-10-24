@@ -1,4 +1,5 @@
 using System.Text;
+using Nation.Streaming;
 
 namespace Nation.Library;
 
@@ -46,17 +47,27 @@ public sealed class PlaylistStore
             var parsed = files.Select(f => (File: f, Lines: File.ReadAllLines(f, Encoding.UTF8))).ToList();
             // One scan for every song that isn't in the library, instead of one per file.
             var outside = parsed.SelectMany(p => p.Lines).Where(IsPath).Select(l => l.Trim())
-                .Where(l => !store._byPath.ContainsKey(l) && File.Exists(l)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                .Where(l => !StreamTracks.IsStream(l) && !store._byPath.ContainsKey(l) && File.Exists(l)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (outside.Count > 0)
                 foreach (var t in TrackScanner.Scan(outside)) store._byPath.TryAdd(t.Path, t with { Id = store._nextId++ });
 
             foreach (var (file, lines) in parsed)
             {
                 var list = new Playlist { FilePath = file, Name = Path.GetFileNameWithoutExtension(file) };
+                // #EXTINF / #EXTALB / #EXTIMG describe the entry that follows them.
+                string info = "", albumLine = "", image = "";
                 foreach (var line in lines)
                 {
                     if (line.StartsWith("#PLAYLIST:", StringComparison.Ordinal)) list.Name = line[10..].Trim();
-                    else if (IsPath(line)) list.Tracks.Add(store.Resolve(line.Trim()));
+                    else if (line.StartsWith("#EXTINF:", StringComparison.Ordinal)) info = line[8..];
+                    else if (line.StartsWith("#EXTALB:", StringComparison.Ordinal)) albumLine = line[8..].Trim();
+                    else if (line.StartsWith("#EXTIMG:", StringComparison.Ordinal)) image = line[8..].Trim();
+                    else if (IsPath(line))
+                    {
+                        string path = line.Trim();
+                        list.Tracks.Add(StreamTracks.IsStream(path) ? StreamFrom(path, info, albumLine, image) : store.Resolve(path));
+                        info = albumLine = image = "";
+                    }
                 }
                 store.All.Add(list);
             }
@@ -69,11 +80,24 @@ public sealed class PlaylistStore
         return store;
     }
 
+    /// <summary>A streamed song from its URL and the "#EXTINF:seconds,Artist - Title" line before it.</summary>
+    private static Track StreamFrom(string url, string info, string album, string image)
+    {
+        if (StreamTracks.VideoIdOf(url) is not { } id || info.Length == 0) return StreamTracks.FromUrl(url);
+        int comma = info.IndexOf(',');
+        int.TryParse(comma < 0 ? info : info[..comma], out int seconds);
+        string label = comma < 0 ? "" : info[(comma + 1)..];
+        int dash = label.IndexOf(" - ", StringComparison.Ordinal);
+        string artist = dash < 0 ? "" : label[..dash], title = dash < 0 ? label : label[(dash + 3)..];
+        return StreamTracks.Get(id, title, artist, album, TimeSpan.FromSeconds(Math.Max(0, seconds)), image.Length > 0 ? image : null);
+    }
+
     private static bool IsPath(string line) => line.Length > 0 && !line.StartsWith('#') && line.Trim().Length > 0;
 
     /// <summary>The library's track for a path, or a placeholder for a file that isn't there.</summary>
     public Track Resolve(string path)
     {
+        if (StreamTracks.IsStream(path)) return StreamTracks.FromUrl(path);
         if (_byPath.TryGetValue(path, out var t)) return t;
         var missing = new Track(path, Path.GetFileNameWithoutExtension(path), "archivo no encontrado", "", 0, TimeSpan.Zero,
             Path.GetExtension(path).TrimStart('.').ToUpperInvariant(), 0, 0, 0) { Id = _nextId++ };
@@ -150,8 +174,13 @@ public sealed class PlaylistStore
             Directory.CreateDirectory(Dir);
             var sb = new StringBuilder("#EXTM3U\n").Append("#PLAYLIST:").Append(list.Name).Append('\n');
             foreach (var t in list.Tracks)
-                sb.Append("#EXTINF:").Append((int)t.Duration.TotalSeconds).Append(',').Append(t.Artist).Append(" - ").Append(t.Title).Append('\n')
-                    .Append(t.Path).Append('\n');
+            {
+                sb.Append("#EXTINF:").Append((int)t.Duration.TotalSeconds).Append(',').Append(t.Artist).Append(" - ").Append(t.Title).Append('\n');
+                // A file has its own tags; a streamed song only has what's written here.
+                if (t.IsStream && t.Album.Length > 0) sb.Append("#EXTALB:").Append(t.Album).Append('\n');
+                if (t.IsStream && t.CoverUrl is { } cover) sb.Append("#EXTIMG:").Append(cover).Append('\n');
+                sb.Append(t.Path).Append('\n');
+            }
             // Write-then-rename so a crash mid-save never leaves a half-written list.
             string tmp = list.FilePath + ".tmp";
             File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));

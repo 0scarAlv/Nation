@@ -185,6 +185,8 @@ public sealed partial class App
     {
         if (Session.Load() is not { } session) return;
         if (volume) _player.SetVolume((int)Math.Round(session.Volume));
+        // Streamed songs have no file to re-read: bring back what was known about them first.
+        foreach (var stream in session.Streams ?? Array.Empty<StreamInfo>()) stream.ToTrack();
         int index = -1;
         // Back into the playlist it was playing from, if that list still has the song.
         if (session.Playlist is { } name && Playlists?.Find(name) is { } list)
@@ -202,6 +204,12 @@ public sealed partial class App
                 if (string.Equals(_player.Queue[i].Path, session.Path, StringComparison.OrdinalIgnoreCase)) { index = i; break; }
             if (index > 0) _player.JumpTo(index);
         }
+        // A YouTube Music song that wasn't from a saved list comes back on its own (needs yt-dlp to load).
+        if (index < 0 && Streaming.StreamTracks.IsStream(session.Path) && Streaming.YtDlp.Available)
+        {
+            _player.PlayFrom(new List<Track> { Streaming.StreamTracks.FromUrl(session.Path) }, "YouTube", 0, play: false);
+            index = _player.CurrentIndex;
+        }
         if (session.UpNext is { Length: > 0 } waiting && Playlists is { } store)
             _player.AddToUpNext(waiting.Select(store.Resolve).ToList());
         if (index < 0) return;
@@ -213,7 +221,10 @@ public sealed partial class App
     public void SaveSession()
     {
         if (_player.Current is not { } track || _resumeIndex >= 0) return;
-        new Session(track.Path, _player.Position, _player.Volume, _player.ContextName, _player.UpNext.Select(t => t.Path).ToArray()).Save();
+        var upNext = _player.UpNext.ToList();
+        var streams = upNext.Prepend(track).Where(t => t.IsStream).Distinct().Select(StreamInfo.From).ToArray();
+        new Session(track.Path, _player.Position, _player.Volume, _player.ContextName, upNext.Select(t => t.Path).ToArray(),
+            streams.Length > 0 ? streams : null).Save();
         _savedPath = track.Path;
         _savedVersion = _player.Version;
     }
@@ -490,6 +501,7 @@ public sealed partial class App
         if (current >= 0 && DateTime.UtcNow - _lastManualMove > FollowDelay && !(_view == SideView.Cola && _filter.Length > 0))
             _cursor = current;
 
+        UpdateYouTube();
         UpdatePalette(dt);
         UpdateSpectrum(dt);
         UpdateLyrics();
@@ -503,6 +515,8 @@ public sealed partial class App
             _savedVersion = _player.Version;
             _lastManualMove = DateTime.MinValue;
         }
+        // A song that never loads (missing file, stream that fails) must not keep the loop busy forever.
+        else if (_resumeIndex >= 0 && now > 20) _resumeIndex = -1;
         else if (_resumeIndex >= 0) _animFast = true;
         // Save on track change, queue edits, and every 5 s while playing.
         if (PersistSession && (_player.Current?.Path != _savedPath || _player.Version != _savedVersion || (_player.Playing && now - _lastSessionSave > 5)))
@@ -872,7 +886,12 @@ public sealed partial class App
         if (notice) _animSlow = true;
         bool sourceNotice = Now - _sourceChangedAt < 2.5 && _sourceNotice is not null;
         if (sourceNotice) _animSlow = true;
-        string title = notice ? $"Reproduciendo · visual: {VisualName}"
+        // A YouTube Music song takes a few seconds while yt-dlp resolves it.
+        bool fetching = !_externalMode && _player.Current is { IsStream: true } && _player.Duration <= 0 && !_player.Idle;
+        if (fetching) _animSlow = true;
+        string title = _deferred is { } waiting ? $"Reproduciendo · {Spinner[(int)(Now * 12) % Spinner.Length]} preparando «{waiting.Track.Title}»…"
+            : fetching ? $"Reproduciendo · {Spinner[(int)(Now * 12) % Spinner.Length]} cargando de YouTube Music…"
+            : notice ? $"Reproduciendo · visual: {VisualName}"
             : sourceNotice ? $"Reproduciendo · {_sourceNotice}"
             : _externalMode ? $"Reproduciendo · {External?.AppName}" : "Reproduciendo";
         notice |= sourceNotice;

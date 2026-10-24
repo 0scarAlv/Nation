@@ -11,7 +11,8 @@ public sealed partial class App
     /// <summary>User playlists (.m3u8 files in %LOCALAPPDATA%\Nation\playlists).</summary>
     public PlaylistStore? Playlists { get; init; }
 
-    private enum SideView { Cola, Biblioteca, Listas, YouTube }
+    // In YouTube mode Biblioteca shows YouTube Music's home ("Principal") and Listas the account's lists.
+    private enum SideView { Cola, Biblioteca, Listas }
     private SideView _view = SideView.Cola;
 
     // Cursor and scroll per list; the queue's own (_cursor, _scroll) also follows the playing song.
@@ -44,17 +45,16 @@ public sealed partial class App
     /// <summary>Typing goes to a text field (search or a list name), so letters aren't shortcuts.</summary>
     private bool TextEntry => _typing || _prompt != PromptKind.None;
 
-    private IReadOnlyList<Track>? ViewTracks => _view switch
+    private IReadOnlyList<Track>? ViewTracks => InYt ? YtTop?.Tracks : _view switch
     {
         SideView.Cola => _player.Queue,
         SideView.Biblioteca => _player.Library,
-        SideView.YouTube => _ytOpen is not null ? _ytOpenTracks : _filter.Length > 0 ? _ytResults : null,
         _ => _openList?.Tracks,
     };
 
-    private bool ShowingListNames => _view == SideView.Listas && _openList is null;
+    private bool ShowingListNames => !InYt && _view == SideView.Listas && _openList is null;
     private List<Playlist> AllLists => Playlists?.All ?? new List<Playlist>();
-    private int FullCount => ShowingListNames ? AllLists.Count : ShowingYtLists ? _ytLists?.Count ?? 0 : ViewTracks?.Count ?? 0;
+    private int FullCount => ShowingListNames ? AllLists.Count : ShowingYtRows ? YtTop!.Flat.Count : ViewTracks?.Count ?? 0;
 
     /// <summary>The search's ranked rows for the list on screen, recomputed only when the text or the list changes.</summary>
     private List<int>? Rows()
@@ -85,8 +85,8 @@ public sealed partial class App
     private ref int ViewCursor()
     {
         if (_view == SideView.Cola) return ref _cursor;
+        if (InYt && YtTop is { } page) return ref page.Cursor;
         if (_view == SideView.Biblioteca) return ref _libCursor;
-        if (_view == SideView.YouTube) return ref _ytOpen is null ? ref _ytCursor : ref _ytListCursor;
         if (_openList is null) return ref _listsCursor;
         return ref _plCursor;
     }
@@ -94,8 +94,8 @@ public sealed partial class App
     private ref int ViewScroll()
     {
         if (_view == SideView.Cola) return ref _scroll;
+        if (InYt && YtTop is { } page) return ref page.Scroll;
         if (_view == SideView.Biblioteca) return ref _libScroll;
-        if (_view == SideView.YouTube) return ref _ytOpen is null ? ref _ytScroll : ref _ytListScroll;
         if (_openList is null) return ref _listsScroll;
         return ref _plScroll;
     }
@@ -135,7 +135,7 @@ public sealed partial class App
 
     private void CycleView(int delta)
     {
-        int n = Enum.GetValues<SideView>().Length - (YouTube is null ? 1 : 0);
+        int n = Enum.GetValues<SideView>().Length;
         SwitchView((SideView)(((int)_view + delta + n) % n));
     }
 
@@ -152,7 +152,7 @@ public sealed partial class App
         _filter = text;
         _rows = null;
         _filterChangedAt = Now;
-        if (YtSearchMode && text.Length == 0) { _ytResults = null; _ytSearched = ""; }
+        if (YtSearchMode && text.Length == 0) { _ytSearch = null; _ytSearched = ""; }
         // A new search starts at its best match.
         ViewCursor() = 0;
         ViewScroll() = 0;
@@ -162,16 +162,22 @@ public sealed partial class App
     private void StartSearch()
     {
         if (!ShowSidebar()) return;
-        if (_view == SideView.Cola) SwitchView(SideView.Biblioteca);
+        // YouTube mode: an open album or list is filtered in place; anywhere else, all of YouTube Music is searched.
+        if (YtMode && YtTop is not { Tracks: not null })
+        {
+            if (_view != SideView.Biblioteca) SwitchView(SideView.Biblioteca);
+            while (_ytHome.Count > 1) _ytHome.RemoveAt(_ytHome.Count - 1);
+            _ytHomeQuery = "";
+        }
+        else if (_view == SideView.Cola) SwitchView(SideView.Biblioteca);
         SetFilter("");
         _typing = true;
     }
 
-    private string ViewName => _view switch
+    private string ViewName => InYt ? (YtTop is { } page ? page.Title.ToLowerInvariant() : "youtube music") : _view switch
     {
         SideView.Cola => "cola",
         SideView.Biblioteca => "biblioteca",
-        SideView.YouTube => _ytOpen is null ? "youtube music" : $"youtube «{_ytOpen.Title}»",
         _ => _openList is null ? "listas" : $"lista «{_openList.Name}»",
     };
 
@@ -186,14 +192,13 @@ public sealed partial class App
             case '1': SwitchView(SideView.Cola); return true;
             case '2': SwitchView(SideView.Biblioteca); return true;
             case '3': SwitchView(SideView.Listas); return true;
-            case '4' when YouTube is not null: SwitchView(SideView.YouTube); return true;
         }
         return false;
     }
 
     private bool HandleSidebarKey(ConsoleKeyInfo key, bool shift)
     {
-        if (_view == SideView.YouTube && HandleYouTubeKey(key, shift)) return true;
+        if (InYt && HandleYouTubeKey(key, shift)) return true;
         int count = RowCount;
         ref int cursor = ref ViewCursor();
         cursor = Math.Clamp(cursor, 0, Math.Max(0, count - 1));
@@ -241,7 +246,7 @@ public sealed partial class App
         if (full < 0) return;
         // A YouTube Music song that isn't resolved yet waits for Nation's resolver instead of
         // making mpv run a second yt-dlp in parallel (which made both take twice as long).
-        if (!ShowingListNames && !ShowingYtLists && ViewTracks is { } shown && full < shown.Count && shown[full] is { IsStream: true } song
+        if (!ShowingListNames && ViewTracks is { } shown && full < shown.Count && shown[full] is { IsStream: true } song
             && DeferUntilResolved(song, () =>
             {
                 if (ViewTracks is { } now && full < now.Count && ReferenceEquals(now[full], song)) ActivateNow(full);
@@ -253,20 +258,17 @@ public sealed partial class App
     private void ActivateNow(int full)
     {
         if (!ShowingListNames && ViewTracks is { } tracks && !CanPlay(new[] { tracks[full] })) return;
+        if (InYt)
+        {
+            if (YtTop is { } page) PlayYtPage(page, full);
+            _lastManualMove = DateTime.MinValue;
+            return;
+        }
         switch (_view)
         {
             case SideView.Cola:
                 SetSource(external: false);
                 _player.PlayEntry(full);
-                break;
-            case SideView.YouTube when _ytOpen is null:
-                SetSource(external: false);
-                PlayWithRadio(_ytResults![full]);
-                break;
-            case SideView.YouTube:
-                SetSource(external: false);
-                if (_player.ContextName != $"YouTube · {_ytOpen.Title}") Notice($"YouTube · {_ytOpen.Title}");
-                _player.PlayFrom(_ytOpenTracks!, $"YouTube · {_ytOpen.Title}", full);
                 break;
             case SideView.Biblioteca:
                 SetSource(external: false);
@@ -495,8 +497,13 @@ public sealed partial class App
     private IEnumerable<MenuItem> SidebarMenuItems()
     {
         const string s = "Lista";
+        if (InYt)
+        {
+            foreach (var item in YouTubeMenuItems()) yield return item;
+            yield break;
+        }
         yield return new(s, "/", "buscar: escribe y se filtra al momento", StartSearch, _filter.Length > 0 ? _filter : null);
-        yield return new(s, YouTube is null ? "1 2 3" : "1 2 3 4", YouTube is null ? "cola · biblioteca · listas (tab cambia)" : "cola · biblioteca · listas · youtube (tab)", () => CycleView(1), ViewName);
+        yield return new(s, "1 2 3", "cola · biblioteca · listas (tab cambia)", () => CycleView(1), ViewName);
         yield return new(s, "j k", "mover · g/G inicio/final · enter reproducir", () => { });
         if (ShowingListNames)
         {
@@ -514,10 +521,9 @@ public sealed partial class App
             if (_view is SideView.Cola or SideView.Listas) yield return new(s, "d", _view == SideView.Cola ? "quitar de la cola" : "quitar de la lista", () => RemoveSelected(SelectedFull));
             yield return new(s, "a", "agregar a una lista", () => OpenPicker(SelectedFull));
             if (_openList is not null) yield return new(s, "h", "volver a las listas", CloseList);
+            if (YouTube is not null) yield return new(s, "o", "modo YouTube Music (panel de fuentes)", OpenSources);
         }
         yield return new(s, "c", "ir a la canción actual", ShowCurrent);
-        if (_view == SideView.YouTube)
-            foreach (var item in YouTubeMenuItems()) yield return item;
     }
 
     // ── drawing ────────────────────────────────────────────────────────
@@ -534,10 +540,8 @@ public sealed partial class App
             rows--;
         }
         if (rows <= 0) return;
-        if (ShowingListNames) DrawListNames(c, x + 1, top, inner, rows);
-        else if (ShowingYtLists) DrawYtLists(c, x + 1, top, inner, rows);
-        else if (ViewTracks is null || _view == SideView.YouTube && ViewTracks.Count == 0)
-            c.Text(x + 3, top, YtPendingText() ?? "", _ytError is not null && !YtBusy ? Danger : Muted, maxWidth: inner - 3);
+        if (InYt) DrawYouTube(c, x + 1, top, inner, rows, current);
+        else if (ShowingListNames) DrawListNames(c, x + 1, top, inner, rows);
         else DrawTracks(c, x + 1, top, inner, rows, current);
     }
 
@@ -546,14 +550,18 @@ public sealed partial class App
     {
         int up = _player.UpNextCount;
         string cola = "Cola" + (_player.Shuffled ? " ⤮" : "") + (up > 0 ? $" +{up}" : "");
-        string listas = _openList is null ? "Listas" : $"Listas › {_openList.Name}";
-        string youtube = _ytOpen is null ? "YouTube" : $"YouTube › {_ytOpen.Title}";
-        var tabs = new[] { (SideView.Cola, cola), (SideView.Biblioteca, "Biblioteca"), (SideView.Listas, listas), (SideView.YouTube, youtube) };
+        string biblioteca = "Biblioteca", listas = _openList is null ? "Listas" : $"Listas › {_openList.Name}";
+        if (YtMode)
+        {
+            // The trail of opened pages shows as "Principal › Arctic Monkeys › AM".
+            biblioteca = string.Join(" › ", _ytHome.Select((p, i) => i == 0 ? "Principal" : p.Title).DefaultIfEmpty("Principal"));
+            listas = string.Join(" › ", _ytLibrary.Select((p, i) => i == 0 ? "Listas" : p.Title).DefaultIfEmpty("Listas"));
+        }
+        var tabs = new[] { (SideView.Cola, cola), (SideView.Biblioteca, biblioteca), (SideView.Listas, listas) };
         int cx = x + 2, end = x + w - 3;
         foreach (var (view, label) in tabs)
         {
             if (cx >= end) break;
-            if (view == SideView.YouTube && YouTube is null) continue;
             bool active = view == _view;
             c.Set(cx++, y, ' ');
             cx += c.Text(cx, y, label, active ? Accent : Muted, bold: active, maxWidth: end - cx);
@@ -564,7 +572,8 @@ public sealed partial class App
     private void DrawSearchBar(Canvas c, int x, int y, int w)
     {
         string count = !YtSearchMode ? $"{RowCount}/{FullCount}"
-            : _ytSearching || _filter != _ytSearched ? YtSpinner : _ytResults is { } found ? $"{found.Count}" : "";
+            : _ytSearch is null or { Loading: true } || _filter != _ytSearched ? YtSpinner
+            : $"{_ytSearch.Flat.Count(r => r.Item is not null)}";
         c.Text(x + 1, y, "/", Accent, bold: true);
         int textW = w - 4 - count.Length - 2;
         // Show the end of a long query, where the typing happens.
@@ -593,6 +602,7 @@ public sealed partial class App
         {
             string empty = _filter.Length > 0 ? $"nada coincide con «{_filter}»"
                 : _openList is not null ? "lista vacía · a en una canción de la biblioteca la agrega aquí"
+                : InYt ? "sin canciones"
                 : "";
             c.Text(x + 2, top, empty, Muted, maxWidth: inner - 3);
             return;
@@ -637,7 +647,8 @@ public sealed partial class App
             else if (queued) c.Set(rx + 3, ry, '+', _fx ? _third : Accent, bold: true);
             c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), queued ? (_fx ? _third : Accent) : _fx ? Rgb.Lerp(Muted, _second, 0.35) : Muted);
 
-            string dur = FormatTime(t.Duration.TotalSeconds);
+            // Songs from YouTube Music cards come without a length (mpv learns it when they play).
+            string dur = t.IsStream && t.Duration <= TimeSpan.Zero ? "" : FormatTime(t.Duration.TotalSeconds);
             int textX = rx + 5 + numWidth + 2;
             int textMax = inner - (textX - rx) - dur.Length - 2;
             int used = c.Text(textX, ry, t.Title, playing ? Accent : Theme.Text, bold: playing, maxWidth: textMax);
@@ -782,7 +793,8 @@ public sealed partial class App
     /// <summary>Footer hint for whatever is taking the keys right now, or null.</summary>
     private string? SidebarHint() =>
         _typing && YtSearchMode ? "escribe para buscar en YouTube Music · ↑↓ elegir · enter listo · esc borra"
-        : _filter.Length > 0 && YtSearchMode && QueueVisible ? "enter la reproduce y sigue con su radio · x a continuación · a a una lista tuya"
+        : _filter.Length > 0 && YtSearchMode && QueueVisible ? "enter: canción → con su radio · álbum/artista/lista → abre · x a continuación"
+        : InYt && YtStack.Count > 1 && !_typing ? "h volver · enter reproducir o abrir · x a continuación · a a una lista tuya"
         : _prompt != PromptKind.None ? "escribe el nombre · enter guardar · esc cancelar"
         : _pickTracks is not null ? "enter agrega a la lista · esc cancelar"
         : _typing ? "escribe para buscar · ↑↓ elegir · enter listo · esc borra"

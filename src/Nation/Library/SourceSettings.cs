@@ -4,10 +4,11 @@ namespace Nation.Library;
 
 /// <summary>
 /// Where the player takes its music from (the sources panel, `o`): whether it follows
-/// other apps on its own, and an app to always follow instead of picking automatically.
+/// other apps on its own, an app to always follow instead of picking automatically, and
+/// whether Nation's own library is the local one or YouTube Music.
 /// Saved to %LOCALAPPDATA%\Nation\sources.json.
 /// </summary>
-public sealed record SourceSettings(bool AutoFollow = true, string? PinnedAppId = null, string? PinnedName = null)
+public sealed record SourceSettings(bool AutoFollow = true, string? PinnedAppId = null, string? PinnedName = null, bool YouTubeMode = false)
 {
     private static readonly string FilePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nation", "sources.json");

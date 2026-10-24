@@ -27,9 +27,18 @@ public static class StreamTracks
         return end < 0 ? id : id[..end];
     }
 
-    /// <summary>The song's track, created on first sight (later sightings get that same object).</summary>
-    public static Track Get(string videoId, string title, string artist, string album, TimeSpan duration, string? cover) =>
-        ByVideo.GetOrAdd(videoId, id => Make(id, title, artist, album, duration, cover));
+    /// <summary>
+    /// The song's track, created on first sight; later sightings get that same object.
+    /// Cards and artist pages leave the length out, so a later sighting that has it
+    /// replaces the entry (whatever already holds the old object keeps it).
+    /// </summary>
+    public static Track Get(string videoId, string title, string artist, string album, TimeSpan duration, string? cover)
+    {
+        var known = ByVideo.GetOrAdd(videoId, id => Make(id, title, artist, album, duration, cover));
+        if (known.Duration > TimeSpan.Zero || duration <= TimeSpan.Zero) return known;
+        var better = Make(videoId, title, artist, album.Length > 0 ? album : known.Album, duration, cover ?? known.CoverUrl) with { Id = known.Id };
+        return ByVideo.TryUpdate(videoId, better, known) ? better : ByVideo[videoId];
+    }
 
     /// <summary>For a bare URL (session, a list written by another player): what we know about it, or a placeholder.</summary>
     public static Track FromUrl(string url)

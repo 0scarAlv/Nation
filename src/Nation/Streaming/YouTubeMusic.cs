@@ -34,7 +34,13 @@ public sealed partial class YouTubeMusic : IDisposable
     private readonly HttpClient _http;
     private string? _cookie, _sapisid;
 
-    public bool SignedIn => _sapisid is not null;
+    public bool SignedIn => _sapisid is not null && !SessionExpired;
+
+    /// <summary>
+    /// A saved cookie Google no longer accepts (it answers as if signed out). Requests then
+    /// go out as a visitor, so home and search keep working, until the user pastes a new one.
+    /// </summary>
+    public bool SessionExpired { get; private set; }
 
     public YouTubeMusic()
     {
@@ -56,18 +62,20 @@ public sealed partial class YouTubeMusic : IDisposable
     {
         string? cookie = ExtractCookie(pasted);
         if (cookie is null) return "eso no parece la cookie de music.youtube.com (falta __Secure-3PAPISID)";
-        var (oldCookie, oldSapisid) = (_cookie, _sapisid);
+        var (oldCookie, oldSapisid, oldExpired) = (_cookie, _sapisid, SessionExpired);
         _cookie = cookie;
         _sapisid = SapisidOf(cookie);
+        SessionExpired = false;
         try
         {
             await LibraryAsync(ct);
         }
         catch (YouTubeMusicException e)
         {
-            (_cookie, _sapisid) = (oldCookie, oldSapisid);
+            (_cookie, _sapisid, SessionExpired) = (oldCookie, oldSapisid, oldExpired);
             return e.Message;
         }
+        SessionExpired = false;
         SaveCookie();
         return null;
     }
@@ -75,6 +83,7 @@ public sealed partial class YouTubeMusic : IDisposable
     public void SignOut()
     {
         _cookie = _sapisid = null;
+        SessionExpired = false;
         try { File.Delete(CookieFile); } catch (IOException) { }
     }
 
@@ -132,17 +141,50 @@ public sealed partial class YouTubeMusic : IDisposable
 
     // ── requests ───────────────────────────────────────────────────────
 
+    // Without a session the site identifies the browser by a visitor id; without one the
+    // home page stops after its first two shelves.
+    // Fetched once and shared: a full search sends five requests at the same moment.
+    private Task<string?>? _visitor;
+
+    private Task<string?> VisitorAsync(CancellationToken ct)
+    {
+        if (SignedIn) return Task.FromResult<string?>(null);
+        var fetch = _visitor;
+        if (fetch is null || fetch.IsCompleted && fetch.Result is null)
+        {
+            var mine = FetchVisitorAsync();
+            fetch = Interlocked.CompareExchange(ref _visitor, mine, fetch) == fetch ? mine : _visitor!;
+        }
+        return fetch.WaitAsync(ct);
+    }
+
+    private async Task<string?> FetchVisitorAsync()
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, Origin);
+            request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+            using var response = await _http.SendAsync(request);
+            var m = Regex.Match(await response.Content.ReadAsStringAsync(), "\"VISITOR_DATA\":\"([^\"]+)\"");
+            return m.Success ? m.Groups[1].Value : null;
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
+        {
+            return null; // retried on the next request
+        }
+    }
+
     private async Task<JsonNode> PostAsync(string endpoint, JsonObject body, CancellationToken ct, string query = "")
     {
-        body["context"] = new JsonObject
+        var client = new JsonObject
         {
-            ["client"] = new JsonObject
-            {
-                ["clientName"] = "WEB_REMIX",
-                ["clientVersion"] = "1." + DateTime.UtcNow.ToString("yyyyMMdd") + ".01.00",
-                ["hl"] = "es",
-            },
+            ["clientName"] = "WEB_REMIX",
+            ["clientVersion"] = "1." + DateTime.UtcNow.ToString("yyyyMMdd") + ".01.00",
+            ["hl"] = "es",
         };
+        string? visitor = await VisitorAsync(ct);
+        if (visitor is not null) client["visitorData"] = visitor;
+        body["context"] = new JsonObject { ["client"] = client };
         using var request = new HttpRequestMessage(HttpMethod.Post, ApiBase + endpoint + "?prettyPrint=false" + query)
         {
             Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
@@ -150,10 +192,13 @@ public sealed partial class YouTubeMusic : IDisposable
         request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
         request.Headers.TryAddWithoutValidation("Origin", Origin);
         request.Headers.TryAddWithoutValidation("X-Origin", Origin);
-        if (_cookie is not null && _sapisid is not null)
+        if (visitor is not null) request.Headers.TryAddWithoutValidation("X-Goog-Visitor-Id", visitor);
+        // SignedIn implies a cookie and its SAPISID.
+        bool withSession = SignedIn;
+        if (withSession)
         {
             request.Headers.TryAddWithoutValidation("Cookie", _cookie);
-            request.Headers.TryAddWithoutValidation("Authorization", SapisidHash(_sapisid));
+            request.Headers.TryAddWithoutValidation("Authorization", SapisidHash(_sapisid!));
             request.Headers.TryAddWithoutValidation("X-Goog-AuthUser", "0");
         }
 
@@ -172,12 +217,45 @@ public sealed partial class YouTubeMusic : IDisposable
         }
         using (response)
         {
+            KeepRotatedCookies(response);
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                throw new YouTubeMusicException("la sesión no es válida o caducó: vuelve a pegar la cookie (i)");
+                throw new YouTubeMusicException("la sesión no es válida o caducó: copia la cookie desde una ventana privada y pulsa i");
             if (!response.IsSuccessStatusCode)
                 throw new YouTubeMusicException($"YouTube Music respondió {(int)response.StatusCode}");
-            return JsonNode.Parse(await response.Content.ReadAsStringAsync(ct)) ?? new JsonObject();
+            var root = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct)) ?? new JsonObject();
+            // A cookie Google doesn't accept still gets an answer, just a signed-out one.
+            if (withSession && !LoggedIn(root))
+            {
+                // Same request again as a visitor, so home and search don't break over it.
+                SessionExpired = true;
+                return await PostAsync(endpoint, body, ct, query);
+            }
+            return root;
         }
+    }
+
+    /// <summary>
+    /// Google rotates session cookies (the __Secure-*PSIDTS ones) and hands the new values
+    /// to whoever is using the session; a browser applies them by itself, so Nation does
+    /// the same with its copy and saves it, or the copy would stop working.
+    /// </summary>
+    private void KeepRotatedCookies(HttpResponseMessage response)
+    {
+        if (_cookie is null || !response.Headers.TryGetValues("Set-Cookie", out var headers)) return;
+        string updated = _cookie;
+        foreach (var header in headers)
+        {
+            int eq = header.IndexOf('='), end = header.IndexOf(';');
+            if (eq <= 0) continue;
+            string name = header[..eq].Trim(), value = header[(eq + 1)..(end < 0 ? header.Length : end)];
+            var existing = new Regex(@"(^|;\s*)" + Regex.Escape(name) + @"=[^;]*");
+            // Only cookies the session already has: the rest is tracking Nation doesn't need.
+            if (existing.IsMatch(updated)) updated = existing.Replace(updated, m => m.Groups[1].Value + name + "=" + value, 1);
+        }
+        if (updated == _cookie) return;
+        _cookie = updated;
+        _sapisid = SapisidOf(updated) ?? _sapisid;
+        SaveCookie();
     }
 
     /// <summary>The header the site sends with a session: SHA-1 of "time SAPISID origin".</summary>
@@ -218,12 +296,9 @@ public sealed partial class YouTubeMusic : IDisposable
         if (!SignedIn) throw new YouTubeMusicException("sin sesión");
         var lists = new List<YtPlaylist> { new("VLLM", "Me gusta", "tus canciones con ♥") };
         var body = new JsonObject { ["browseId"] = "FEmusic_liked_playlists" };
-        bool first = true;
-        await foreach (var page in PagesAsync(body, legacy: true, ct))
+        await foreach (var page in PagesAsync(body, legacy: true, ct, legacyInBody: false))
         {
-            // A cookie Google doesn't accept still gets an answer, just a signed-out one.
-            if (first && !LoggedIn(page)) throw new YouTubeMusicException("YouTube Music no reconoció la sesión: copia la cookie otra vez");
-            first = false;
+            if (!SignedIn) throw new YouTubeMusicException("la sesión caducó: copia la cookie desde una ventana privada (y ciérrala sin salir) y pulsa i");
             foreach (var item in Find(page, "musicTwoRowItemRenderer"))
             {
                 string? id = Str(item, "navigationEndpoint", "browseEndpoint", "browseId");
@@ -257,7 +332,7 @@ public sealed partial class YouTubeMusic : IDisposable
     /// continuationItemRenderer token; the library grid still uses the older
     /// nextContinuationData (legacy), which on playlist pages would load suggestions instead.
     /// </summary>
-    private async IAsyncEnumerable<JsonNode> PagesAsync(JsonObject body, bool legacy, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    private async IAsyncEnumerable<JsonNode> PagesAsync(JsonObject body, bool legacy, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct, bool legacyInBody = true)
     {
         var page = await PostAsync("browse", body, ct);
         var seen = new HashSet<string>();
@@ -276,8 +351,14 @@ public sealed partial class YouTubeMusic : IDisposable
             }
             string? legacyToken = legacy ? Find(page, "nextContinuationData").Select(c => Str(c, "continuation")).LastOrDefault(t => t is not null) : null;
             if (legacyToken is null || !seen.Add(legacyToken)) yield break;
-            string q = "&ctoken=" + Uri.EscapeDataString(legacyToken) + "&continuation=" + Uri.EscapeDataString(legacyToken) + "&type=next";
-            page = await PostAsync("browse", (JsonObject)body.DeepClone(), ct, q);
+            // The home page takes the token in the body; the library grid (as ytmusicapi does it) in the URL.
+            if (legacyInBody)
+                page = await PostAsync("browse", new JsonObject { ["continuation"] = legacyToken }, ct);
+            else
+            {
+                string q = "&ctoken=" + Uri.EscapeDataString(legacyToken) + "&continuation=" + Uri.EscapeDataString(legacyToken) + "&type=next";
+                page = await PostAsync("browse", (JsonObject)body.DeepClone(), ct, q);
+            }
         }
     }
 
@@ -291,8 +372,11 @@ public sealed partial class YouTubeMusic : IDisposable
         return tracks;
     }
 
-    /// <summary>A song row (search results, playlists): title column, then artist/album/length runs.</summary>
-    private static Track? ListSong(JsonNode item)
+    /// <summary>
+    /// A song row (search results, playlists, albums): title column, then artist/album/length
+    /// runs. Album rows leave out what the album header already says, hence the defaults.
+    /// </summary>
+    private static Track? ListSong(JsonNode item, string defaultArtist = "", string defaultAlbum = "", string? defaultCover = null)
     {
         if (Str(item, "musicItemRendererDisplayPolicy") == "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT") return null;
         var columns = item["flexColumns"] as JsonArray;
@@ -321,8 +405,10 @@ public sealed partial class YouTubeMusic : IDisposable
                 else if (i == 1 && fallbackArtist is null && text.Trim() is { Length: > 1 } t && t != "•") fallbackArtist = t;
             }
         }
-        string artist = artists.Count > 0 ? string.Join(", ", artists) : fallbackArtist ?? "";
-        return StreamTracks.Get(videoId, title, artist, album, ParseDuration(duration), Cover(item["thumbnail"]?["musicThumbnailRenderer"]?["thumbnail"]));
+        string artist = artists.Count > 0 ? string.Join(", ", artists) : fallbackArtist ?? defaultArtist;
+        if (album.Length == 0) album = defaultAlbum;
+        return StreamTracks.Get(videoId, title, artist, album, ParseDuration(duration),
+            Cover(item["thumbnail"]?["musicThumbnailRenderer"]?["thumbnail"]) ?? defaultCover);
     }
 
     /// <summary>A song in a radio/queue panel: title, "artist • album • year" byline, length.</summary>

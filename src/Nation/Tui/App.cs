@@ -365,7 +365,7 @@ public sealed partial class App
         _sourceRow = Math.Max(0, active);
     }
 
-    private enum SourceKind { Local, Auto, App }
+    private enum SourceKind { Local, YouTube, Auto, App }
 
     private sealed record SourceRow(SourceKind Kind, string Name, string Detail, string Status, bool Active, bool Pinned, string? AppId);
 
@@ -376,9 +376,13 @@ public sealed partial class App
         bool auto = _externalMode && ext?.PinnedAppId is null;
         var rows = new List<SourceRow>
         {
-            new(SourceKind.Local, "Biblioteca local", $"{_player.Library.Count} pistas", "", !_externalMode, false, null),
+            new(SourceKind.Local, "Biblioteca local", $"{_player.Library.Count} pistas", "", !_externalMode && !YtMode, false, null),
             new(SourceKind.Auto, "Automático", "la que esté sonando (prefiere apps de música)", "", auto, false, null),
         };
+        // YouTube Music plays inside Nation (no other app), so it sits next to the local library.
+        if (YouTube is { } yt)
+            rows.Insert(1, new(SourceKind.YouTube, "YouTube Music", yt.SignedIn ? "tu cuenta: principal, tus listas, búsqueda" : "sin sesión: principal y búsqueda",
+                "", YtMode, false, null));
         if (ext is null) return rows;
         var sessions = ext.Sessions.ToList();
         // A pinned app that isn't open right now still gets a row, so it can be unpinned.
@@ -418,7 +422,11 @@ public sealed partial class App
         switch (row.Kind)
         {
             case SourceKind.Local:
-                SetSource(external: false);
+                SetYouTubeMode(false);
+                return;
+            case SourceKind.YouTube:
+                SetYouTubeMode(true);
+                _sourcesOpen = false;
                 return;
             case SourceKind.Auto:
                 if (ext is null) return;
@@ -818,11 +826,15 @@ public sealed partial class App
         if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, stateColor, false, stateAge, row: 5)) c.Text(x, 0, state, stateColor);
         x += TextWidth.Of(state) + 3;
         if (_externalMode) x += c.Text(x, 0, $"◉ {External?.AppName}", _fx ? _third : Accent, bold: true) + 3;
-        else if (_player.ContextName is { } listName) x += c.Text(x, 0, $"≡ {listName}", _fx ? _third : Accent, maxWidth: 28) + 3;
+        else
+        {
+            if (YtMode) x += c.Text(x, 0, "◉ YouTube Music", _fx ? _third : Accent, bold: true) + 3;
+            if (_player.ContextName is { } listName) x += c.Text(x, 0, $"≡ {listName}", _fx ? _third : Accent, maxWidth: 28) + 3;
+        }
         if (Playback.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
         if (Playback.Repeat) c.Text(x, 0, "⟳ repetir", _fx ? _third : Accent);
 
-        string count = _externalMode ? "" : $"{_player.Library.Count} pistas";
+        string count = _externalMode || YtMode ? "" : $"{_player.Library.Count} pistas";
         int right = c.Width - count.Length - 1;
         c.Text(right, 0, count, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted);
         // Tempo: the note flashes on every detected beat; hidden when the beat is lost.
@@ -1105,7 +1117,7 @@ public sealed partial class App
         items.Add(new("Reproducción", "s", "aleatorio", () => { p.ToggleShuffle(); JumpToCurrent(); }, YesNo(p.Shuffled)));
         items.Add(new("Reproducción", "r", "repetir", p.ToggleRepeat, YesNo(p.Repeat)));
 
-        items.Add(new("Vista", "o", "fuentes: biblioteca, Spotify, navegador…", OpenSources, _externalMode ? External?.AppName : "biblioteca"));
+        items.Add(new("Vista", "o", "fuentes: biblioteca, YouTube Music, Spotify…", OpenSources, _externalMode ? External?.AppName : YtMode ? "youtube music" : "biblioteca"));
         if (!_externalMode) items.Add(new("Vista", "b", "lista de canciones (barra lateral)", ToggleSidebar, Ui.ShowQueue ? "visible" : "oculta"));
         items.Add(new("Vista", "l", "letra", () => _showLyrics = !_showLyrics, YesNo(_showLyrics)));
         if (!_externalMode) items.Add(new("Vista", "e", "ecualizador", () => { _eqOpen = true; _sourcesOpen = false; }));

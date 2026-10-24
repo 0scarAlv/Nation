@@ -79,6 +79,9 @@ internal static unsafe partial class MpvNative
     [LibraryImport(Lib, EntryPoint = "mpv_wakeup")]
     public static partial void Wakeup(IntPtr ctx);
 
+    [LibraryImport(Lib, EntryPoint = "mpv_free")]
+    public static partial void Free(void* data);
+
     [LibraryImport(Lib, EntryPoint = "mpv_error_string")]
     public static partial IntPtr ErrorString(int error);
 

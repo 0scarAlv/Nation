@@ -37,6 +37,15 @@ Arranca en pausa donde te quedaste: la última canción, en el segundo en que la
 - **Visualizador** (`v` cambia, se recuerda en `ui.json`): barras, espejo (crece desde el centro, bajos al medio), onda (relleno en braille, 2×4 puntos por celda), lluvia (katakana estilo Matrix: cada columna cae más rápido y con estela más larga según su banda), círculo (el espectro como anillo en braille que respira con el golpe, bajos arriba; se vuelve óvalo en paneles bajos), osciloscopio (una onda viva reconstruida con las bandas), cascada (espectrograma horizontal estilo Audacity/Spek en braille: 96 bandas logarítmicas de 30 Hz a 16 kHz sacadas del mismo FFT, 2×4 puntos por celda, la intensidad se ve por densidad de puntos y color; el tiempo corre de derecha a izquierda y se congela en pausa) y reflejo (barras sobre agua, con su reflejo ondulante). Todos son transparentes: donde no hay sonido no pintan fondo.
 - Al arrancar, barrido diagonal tipo CRT; el estado (reproduciendo/pausa) se ilumina letra por letra al cambiar; el volumen se desliza al nuevo nivel con destello; el cursor de la cola deja una estela.
 
+## Búsqueda, cola y listas
+
+El panel izquierdo tiene tres pestañas: **Cola** (`1`, el orden real en que va a sonar), **Biblioteca** (`2`, todo lo escaneado) y **Listas** (`3`, tus playlists). `tab` / `shift+tab` también cambian. Si tenías el panel oculto (`b`), cualquiera de estas teclas o `/` lo vuelve a mostrar.
+
+- **Búsqueda dinámica (`/`)**: los resultados se actualizan con cada tecla. Cada palabra que escribes tiene que aparecer en el título, el artista o el álbum, así que entre más escribes más se afina (`arctic 505`); no distingue mayúsculas ni acentos (`cancion` encuentra *Canción*). Primero salen los títulos que empiezan como lo escribiste, después las palabras que empiezan así, después el resto; lo que coincide se ilumina. `↑`/`↓` eligen mientras escribes, `enter` deja los resultados y devuelve las teclas a la lista, `esc` borra la búsqueda. Buscar **no recorta la cola**: `enter` sobre un resultado lo reproduce y después sigue toda la biblioteca (o toda la lista) en su orden, como si no hubieras buscado.
+- **A continuación (`x`)**: mete la canción seleccionada justo después de la que suena, detrás de las que ya estaban esperando, sin tocar nada más; `X` la pone primera en la fila. En la Cola las que esperan llevan un `+` (y la pestaña dice cuántas, `Cola +3`); en Biblioteca y Listas también se marcan. Una vez que suenan salen de la cola solas. Sobreviven a cambiar de lista, al aleatorio (siempre van antes del resto mezclado) y a cerrar Nation.
+- **Reordenar (`J`/`K`, o `shift+↑`/`↓`)**: en la Cola sube o baja la canción seleccionada una posición, entre cualquiera de las que vienen después de la actual; dentro de una lista, reordena la lista. `d` quita la canción de la cola (o de la lista). Todo se hace sobre el propio playlist de mpv, así que la canción que suena nunca se corta y el paso a la siguiente sigue sin pausa.
+- **Listas con nombre**: en Listas, `a` crea una, `R` la renombra, `d` dos veces la borra, `enter` la abre (`h`/`esc` vuelve) y `x` manda la lista entera a "a continuación". En cualquier canción, `a` abre "Agregar a…" para elegir la lista o crear una nueva ahí mismo. `enter` sobre una canción de una lista reproduce esa lista desde ahí (el encabezado muestra `≡ nombre`); `enter` en la Biblioteca vuelve a la biblioteca completa. Se guardan como `.m3u8` normales (abren en cualquier reproductor) en `%LOCALAPPDATA%\Nation\playlists`; si un archivo de la lista no está, la lista lo conserva y lo muestra como *archivo no encontrado*.
+
 ## Ecualizador
 
 `e` abre un ecualizador gráfico de 10 bandas (31 Hz – 16 kHz, ±12 dB) en lugar de la letra. Cada banda es un filtro `equalizer` de ffmpeg dentro de mpv; los cambios se aplican en vivo con `af-command`, sin reconstruir la cadena de audio ni cortar la canción. Mientras nunca se activa no se agrega ningún filtro. Presets: Plano, Bajos, Vocal, Rock, Electrónica, Acústico, Agudos y tu curva personalizada (se conserva aunque pases por los presets). Se aplica un preamp negativo igual al mayor refuerzo para que nada sature, así que una curva con mucho refuerzo suena más baja: sube el volumen para compensar. Detrás de cada deslizador se ve el espectro en vivo de esa frecuencia. La configuración se guarda en `%LOCALAPPDATA%\Nation\eq.json`.
@@ -95,21 +104,26 @@ El pie solo muestra `shift comandos`: **un toque de `shift`** (presionar y solta
 | `b` | mostrar / ocultar la lista de canciones (se recuerda en `%LOCALAPPDATA%\Nation\ui.json`) |
 | `l` · `e` · `v` · `f` | letra · ecualizador · visualizador (8 modos) · efectos |
 | `,` / `.` | desfase de letra −/+ 0.25 s |
+| `1` `2` `3` · `tab` | cola · biblioteca · listas |
+| `/` | búsqueda dinámica (`enter` listo, `esc` borra) |
 | `j`/`k`, `↑`/`↓`, `g`/`G`, `enter`, `c` | lista: mover, inicio/final, reproducir, ir a la actual |
+| `x` · `X` | a continuación (al final de las que esperan · primera) |
+| `J` / `K` | subir / bajar la canción en la cola o en una lista |
+| `d` · `a` | quitar de la cola/lista · agregar a una lista (en Listas: `a` nueva, `R` renombrar, `d d` borrar) |
 | `shift` (solo) · `?` · `F1` | menú de comandos |
 | `q` | salir |
 
 ## Roadmap
 
 1. ~~MVP: reproducción, cola, seek, volumen~~
-2. Biblioteca (SQLite) con vistas por artista / álbum, búsqueda
+2. Biblioteca (SQLite) con vistas por artista / álbum · ~~búsqueda~~
 3. ~~Letras sincronizadas~~ · carátula en half-blocks
 4. ~~Integración con Shade (API tipo Tauon) · publicar en SMTC (teclas multimedia / overlay de Windows)~~
 - Sincronización automática de letras planas (alineación con Whisper) → `.lrc` junto al archivo
 5. Carátula Sixel/Kitty
 - ~~Modo skin para Spotify / YouTube Music vía SMTC~~
 - ~~1.0: primera versión pública~~
-- 1.1: playlists propias, navegación entre ellas estilo lf
+- ~~1.1: búsqueda dinámica, cola "a continuación" reordenable, playlists propias~~
 - Firma digital del instalador y el ejecutable (SignPath o Certum)
 
 ## Licencia

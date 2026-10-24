@@ -62,7 +62,7 @@ using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null
 var sources = SourceSettings.Load();
 using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Playlists = PlaylistStore.Load(player.Library), Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;
@@ -78,14 +78,21 @@ if (snapshotPath is not null)
     player.ToggleMute();
     var canvas = new Canvas(110, 28);
     var keysAt = DateTime.UtcNow.AddSeconds(1.5);
-    for (var until = DateTime.UtcNow.AddSeconds(3); DateTime.UtcNow < until; Thread.Sleep(frame))
+    // Long key sequences get the time they need, plus a second to settle.
+    double seconds = Math.Max(3, 1.5 + (snapshotKeys?.Length ?? 0) * 0.25 + 1);
+    for (var until = DateTime.UtcNow.AddSeconds(seconds); DateTime.UtcNow < until; Thread.Sleep(frame))
     {
         // --snapshot-keys: press one key every 0.25 s once sessions had time to load (letters, '>' = enter).
         if (snapshotKeys is { Length: > 0 } && DateTime.UtcNow >= keysAt)
         {
             char k = snapshotKeys[0];
-            app.HandleKey(k == '>' ? new ConsoleKeyInfo((char)13, ConsoleKey.Enter, false, false, false)
-                : new ConsoleKeyInfo(k, (ConsoleKey)char.ToUpperInvariant(k), false, false, false));
+            // '>' = enter, '<' = esc, capitals = with shift.
+            app.HandleKey(k switch
+            {
+                '>' => new ConsoleKeyInfo((char)13, ConsoleKey.Enter, false, false, false),
+                '<' => new ConsoleKeyInfo((char)27, ConsoleKey.Escape, false, false, false),
+                _ => new ConsoleKeyInfo(k, (ConsoleKey)char.ToUpperInvariant(k), char.IsUpper(k), false, false),
+            });
             snapshotKeys = snapshotKeys[1..];
             keysAt = DateTime.UtcNow.AddSeconds(0.25);
         }
@@ -93,6 +100,7 @@ if (snapshotPath is not null)
         app.Draw(canvas);
     }
     File.WriteAllLines(snapshotPath, Enumerable.Range(0, canvas.Height).Select(canvas.RowText));
+    Console.Error.WriteLine($"queue: {player.Queue.Count} entries, {player.UpNextCount} up next, mirror mismatches: {player.MirrorMismatches()}");
     return 0;
 }
 

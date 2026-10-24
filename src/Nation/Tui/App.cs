@@ -10,7 +10,7 @@ using Nation.Remote;
 namespace Nation.Tui;
 
 /// <summary>Screen layout, animation state and key handling. Playback state is always read from Player.</summary>
-public sealed class App
+public sealed partial class App
 {
     private readonly Player _player;
     private readonly SpectrumAnalyzer _spectrum;
@@ -140,6 +140,7 @@ public sealed class App
     private double _resumePosition;
     private double _lastSessionSave;
     private string? _savedPath;
+    private int _savedVersion;
     private const double BootTime = 0.9;
 
     private readonly float[] _bars = new float[SpectrumAnalyzer.BandCount];
@@ -183,29 +184,50 @@ public sealed class App
     public void RestoreSession(bool volume)
     {
         if (Session.Load() is not { } session) return;
-        int index = -1;
-        for (int i = 0; i < _player.Queue.Count; i++)
-            if (string.Equals(_player.Queue[i].Path, session.Path, StringComparison.OrdinalIgnoreCase)) { index = i; break; }
         if (volume) _player.SetVolume((int)Math.Round(session.Volume));
+        int index = -1;
+        // Back into the playlist it was playing from, if that list still has the song.
+        if (session.Playlist is { } name && Playlists?.Find(name) is { } list)
+        {
+            int at = list.Tracks.FindIndex(t => string.Equals(t.Path, session.Path, StringComparison.OrdinalIgnoreCase));
+            if (at >= 0)
+            {
+                _player.PlayFrom(list.Tracks, list.Name, at, play: false);
+                index = _player.CurrentIndex;
+            }
+        }
+        if (index < 0)
+        {
+            for (int i = 0; i < _player.Queue.Count; i++)
+                if (string.Equals(_player.Queue[i].Path, session.Path, StringComparison.OrdinalIgnoreCase)) { index = i; break; }
+            if (index > 0) _player.JumpTo(index);
+        }
+        if (session.UpNext is { Length: > 0 } waiting && Playlists is { } store)
+            _player.AddToUpNext(waiting.Select(store.Resolve).ToList());
         if (index < 0) return;
         _resumeIndex = index;
         _resumePosition = session.Position;
-        if (index > 0) _player.JumpTo(index);
     }
 
     /// <summary>Writes the current track/position; also called by Program on exit.</summary>
     public void SaveSession()
     {
         if (_player.Current is not { } track || _resumeIndex >= 0) return;
-        new Session(track.Path, _player.Position, _player.Volume).Save();
+        new Session(track.Path, _player.Position, _player.Volume, _player.ContextName, _player.UpNext.Select(t => t.Path).ToArray()).Save();
         _savedPath = track.Path;
+        _savedVersion = _player.Version;
     }
 
     /// <summary>Returns false when the app should quit.</summary>
     public bool HandleKey(ConsoleKeyInfo key)
     {
-        var queue = _player.Queue;
         bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
+        if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control)) return false;
+        if (_typing && !QueueVisible) _typing = false;
+        // Text fields and the list picker take every key while open.
+        if (_prompt != PromptKind.None) { HandlePromptKey(key); return true; }
+        if (_typing) { HandleSearchKey(key); return true; }
+        if (_pickTracks is not null) { HandlePickerKey(key); return true; }
         if (_menuOpen)
         {
             if (HandleMenuKey(key, out bool handled) is false) return false;
@@ -215,6 +237,8 @@ public sealed class App
         // Offset keys by character so they work on both US and Spanish layouts.
         if (_sourcesOpen && HandleSourcesKey(key)) return true;
         if (_eqOpen && HandleEqKey(key, shift)) return true;
+        if (HandleLibraryShortcut(key)) return true;
+        if (QueueVisible && HandleSidebarKey(key, shift)) return true;
         switch (key.KeyChar)
         {
             case ',': NudgeLyrics(-0.25); return true;
@@ -223,13 +247,12 @@ public sealed class App
         switch (key.Key)
         {
             case ConsoleKey.Q:
-            case ConsoleKey.C when key.Modifiers.HasFlag(ConsoleModifiers.Control):
                 return false;
             case ConsoleKey.Spacebar: Playback.TogglePause(); break;
             case ConsoleKey.N: Playback.Next(); break;
             case ConsoleKey.P: Playback.Previous(); break;
             case ConsoleKey.S: Playback.ToggleShuffle(); JumpToCurrent(); break;
-            case ConsoleKey.C: JumpToCurrent(); break;
+            case ConsoleKey.C: ShowCurrent(); break;
             case ConsoleKey.B: ToggleSidebar(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
@@ -241,21 +264,7 @@ public sealed class App
             case ConsoleKey.M: Playback.ToggleMute(); break;
             case ConsoleKey.OemPlus or ConsoleKey.Add: Playback.AddVolume(5); break;
             case ConsoleKey.OemMinus or ConsoleKey.Subtract: Playback.AddVolume(-5); break;
-            // Queue navigation only while the sidebar is on screen.
-            case ConsoleKey.J or ConsoleKey.DownArrow when QueueVisible: MoveCursor(1); break;
-            case ConsoleKey.K or ConsoleKey.UpArrow when QueueVisible: MoveCursor(-1); break;
-            case ConsoleKey.PageDown when QueueVisible: MoveCursor(10); break;
-            case ConsoleKey.PageUp when QueueVisible: MoveCursor(-10); break;
-            case ConsoleKey.G when shift && QueueVisible: MoveCursor(queue.Count); break;
-            case ConsoleKey.G or ConsoleKey.Home when QueueVisible: MoveCursor(-queue.Count); break;
-            case ConsoleKey.End when QueueVisible: MoveCursor(queue.Count); break;
             case ConsoleKey.O: OpenSources(); break;
-            case ConsoleKey.Enter when QueueVisible:
-                // Picking a song from the library brings Nation back to its own player.
-                SetSource(external: false);
-                _player.PlayIndex(_cursor);
-                _lastManualMove = DateTime.MinValue;
-                break;
         }
         return true;
     }
@@ -283,12 +292,6 @@ public sealed class App
         change();
         _player.ApplyEqualizer(_eq);
         _eqChangedAt = Now;
-    }
-
-    private void MoveCursor(int delta)
-    {
-        _cursor = Math.Clamp(_cursor + delta, 0, Math.Max(0, _player.Queue.Count - 1));
-        _lastManualMove = DateTime.UtcNow;
     }
 
     private void JumpToCurrent() => _lastManualMove = DateTime.MinValue;
@@ -362,7 +365,7 @@ public sealed class App
         bool auto = _externalMode && ext?.PinnedAppId is null;
         var rows = new List<SourceRow>
         {
-            new(SourceKind.Local, "Biblioteca local", $"{_player.Queue.Count} pistas", "", !_externalMode, false, null),
+            new(SourceKind.Local, "Biblioteca local", $"{_player.Library.Count} pistas", "", !_externalMode, false, null),
             new(SourceKind.Auto, "Automático", "la que esté sonando (prefiere apps de música)", "", auto, false, null),
         };
         if (ext is null) return rows;
@@ -483,7 +486,8 @@ public sealed class App
             _trackChangedAt = now;
             TriggerGlitch(now, 0.22);
         }
-        if (current >= 0 && DateTime.UtcNow - _lastManualMove > FollowDelay)
+        // The queue's cursor follows the playing song (not while a search is narrowing the queue).
+        if (current >= 0 && DateTime.UtcNow - _lastManualMove > FollowDelay && !(_view == SideView.Cola && _filter.Length > 0))
             _cursor = current;
 
         UpdatePalette(dt);
@@ -494,11 +498,14 @@ public sealed class App
         {
             if (_resumePosition > 1 && _resumePosition < _player.Duration - 2) _player.SeekAbsolute(_resumePosition);
             _resumeIndex = -1;
+            // session.json already holds this state; saving now would store the pre-seek position (0:00).
+            _savedPath = _player.Current?.Path;
+            _savedVersion = _player.Version;
             _lastManualMove = DateTime.MinValue;
         }
         else if (_resumeIndex >= 0) _animFast = true;
-        // Save on track change and every 5 s while playing.
-        if (PersistSession && (_player.Current?.Path != _savedPath || (_player.Playing && now - _lastSessionSave > 5)))
+        // Save on track change, queue edits, and every 5 s while playing.
+        if (PersistSession && (_player.Current?.Path != _savedPath || _player.Version != _savedVersion || (_player.Playing && now - _lastSessionSave > 5)))
         {
             _lastSessionSave = now;
             SaveSession();
@@ -509,7 +516,7 @@ public sealed class App
         DrawHeader(c);
         int bodyTop = 1, bodyHeight = c.Height - 2;
         int leftWidth = !QueueVisible ? 0 : c.Width < 70 ? c.Width / 2 : Math.Clamp(c.Width * 42 / 100, 30, 64);
-        if (QueueVisible) DrawQueue(c, 0, bodyTop, leftWidth, bodyHeight, current);
+        if (QueueVisible) DrawSidebar(c, 0, bodyTop, leftWidth, bodyHeight, current);
 
         // Right column: player on top, lyrics below; on short terminals lyrics take it all.
         int rx = leftWidth, rw = c.Width - leftWidth;
@@ -528,6 +535,8 @@ public sealed class App
             DrawLower(c, rx, bodyTop, rw, bodyHeight, dt);
         DrawFooter(c);
         if (_menuOpen) DrawMenu(c);
+        if (_pickTracks is not null) DrawPicker(c);
+        if (_prompt != PromptKind.None) DrawPrompt(c);
         if (_fx && now < BootTime) DrawBoot(c, now / BootTime);
         PublishRemote();
         // While following another app, Nation's own media session steps aside (it would show a paused duplicate).
@@ -795,10 +804,11 @@ public sealed class App
         if (!DrawDecoded(c, x, 0, TextWidth.Of(state), state, stateColor, false, stateAge, row: 5)) c.Text(x, 0, state, stateColor);
         x += TextWidth.Of(state) + 3;
         if (_externalMode) x += c.Text(x, 0, $"◉ {External?.AppName}", _fx ? _third : Accent, bold: true) + 3;
+        else if (_player.ContextName is { } listName) x += c.Text(x, 0, $"≡ {listName}", _fx ? _third : Accent, maxWidth: 28) + 3;
         if (Playback.Shuffled) x += c.Text(x, 0, "⤮ aleatorio", Accent) + 3;
         if (Playback.Repeat) c.Text(x, 0, "⟳ repetir", _fx ? _third : Accent);
 
-        string count = _externalMode ? "" : $"{_player.Queue.Count} pistas";
+        string count = _externalMode ? "" : $"{_player.Library.Count} pistas";
         int right = c.Width - count.Length - 1;
         c.Text(right, 0, count, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted);
         // Tempo: the note flashes on every detected beat; hidden when the beat is lost.
@@ -844,61 +854,6 @@ public sealed class App
         }));
     }
 
-    private void DrawQueue(Canvas c, int x, int y, int w, int h, int current)
-    {
-        var queue = _player.Queue;
-        Panel(c, x, y, w, h, _player.Shuffled ? "Cola ⤮" : "Cola", Accent, Accent);
-
-        int rows = h - 2, inner = w - 2;
-        if (rows <= 0) return;
-
-        if (_cursor < _scroll) _scroll = _cursor;
-        if (_cursor >= _scroll + rows) _scroll = _cursor - rows + 1;
-        _scroll = Math.Clamp(_scroll, 0, Math.Max(0, queue.Count - rows));
-
-        var selection = Rgb.Lerp(_palette.Backdrop, Theme.Selection, 0.25);
-        if (_cursor != _lastCursor)
-        {
-            if (_lastCursor >= 0) { _prevCursor = _lastCursor; _cursorMovedAt = Now; }
-            _lastCursor = _cursor;
-        }
-        double trail = (Now - _cursorMovedAt) / 0.3;
-        if (_fx && trail < 1) _animFast = true;
-        int numWidth = Math.Max(2, queue.Count.ToString().Length);
-        for (int row = 0; row < rows; row++)
-        {
-            int i = _scroll + row;
-            if (i >= queue.Count) break;
-            var t = queue[i];
-            int ry = y + 1 + row, rx = x + 1;
-            bool playing = i == current, selected = i == _cursor;
-
-            // Playing row: a band of the cover's backdrop that brightens with the bass.
-            if (playing && !selected && _fx)
-                c.FillRow(rx, ry, inner, Rgb.Lerp(_palette.Backdrop, Accent, _player.Playing ? BassStep * 0.22 : 0));
-            if (selected) c.FillRow(rx, ry, inner, selection);
-            if (selected && _fx) c.Set(rx, ry, '▌', _second, selection);
-            else if (_fx && i == _prevCursor && trail < 1) c.Set(rx, ry, '▌', Rgb.Lerp(_second, _palette.Backdrop, trail));
-            if (playing) DrawMiniEq(c, rx + 1, ry);
-            c.Text(rx + 5, ry, (i + 1).ToString().PadLeft(numWidth), _fx ? Rgb.Lerp(Muted, _second, 0.35) : Muted);
-
-            string dur = FormatTime(t.Duration.TotalSeconds);
-            int textX = rx + 5 + numWidth + 2;
-            int textMax = inner - (textX - rx) - dur.Length - 2;
-            int used = c.Text(textX, ry, t.Title, playing ? Accent : Theme.Text, bold: playing, maxWidth: textMax);
-            if (used + 3 < textMax)
-                c.Text(textX + used, ry, " · " + t.Artist, _fx ? Rgb.Lerp(Muted, _third, 0.5) : Muted, maxWidth: textMax - used);
-            if (playing && _fx && _player.Playing)
-            {
-                // A light band sweeps across the playing title every few seconds.
-                double sweep = Now % 4.0 / 0.9 * (used + 6) - 3;
-                for (int col = Math.Max(0, (int)sweep - 2); col <= sweep + 2 && col < used; col++)
-                    c.Recolor(textX + col, ry, Rgb.Lerp(Accent, Fx.White, 1 - Math.Abs(col - sweep) / 3));
-            }
-            c.Text(rx + inner - dur.Length - 1, ry, dur, _fx ? Rgb.Lerp(Muted, _second, 0.25) : Muted);
-        }
-    }
-
     /// <summary>Three tiny bars driven by bass/mid/treble; static pause glyph otherwise.</summary>
     private void DrawMiniEq(Canvas c, int x, int y)
     {
@@ -928,7 +883,7 @@ public sealed class App
         if (t is null)
         {
             string empty = _externalMode ? $"{External?.AppName} no está mostrando ninguna canción"
-                : _player.Queue.Count == 0 ? "No hay música en tu carpeta Música: abre Spotify, YouTube Music u otra app, o pasa una carpeta (nation \"D:\\Musica\")"
+                : _player.Library.Count == 0 ? "No hay música en tu carpeta Música: abre Spotify, YouTube Music u otra app, o pasa una carpeta (nation \"D:\\Musica\")"
                 : "Nada en reproducción";
             c.Text(ix, y + 2, empty, Muted, maxWidth: iw);
             return;
@@ -1083,6 +1038,8 @@ public sealed class App
     /// <summary>Shift tapped on its own: open or close the command menu. Returns true (keep running).</summary>
     public bool ToggleMenu()
     {
+        // Shift is for capitals while typing a search or a name.
+        if (TextEntry || _pickTracks is not null) return true;
         if (_menuOpen) _menuOpen = false;
         else OpenMenu();
         return true;
@@ -1139,11 +1096,8 @@ public sealed class App
         items.Add(new("Letra", ",", "desfase −0.25 s", () => NudgeLyrics(-0.25)));
         items.Add(new("Letra", ".", "desfase +0.25 s", () => NudgeLyrics(+0.25)));
 
-        if (QueueVisible)
-        {
-            items.Add(new("Lista", "j k", "mover · g/G inicio/final · enter reproducir", () => { }));
-            items.Add(new("Lista", "c", "ir a la canción actual", JumpToCurrent));
-        }
+        if (QueueVisible) items.AddRange(SidebarMenuItems());
+        else if (!_externalMode) items.Add(new("Lista", "/", "buscar en la biblioteca", StartSearch));
         items.Add(new("General", "q", "salir", () => _quit = true));
         return items;
     }
@@ -1184,11 +1138,7 @@ public sealed class App
         }
 
         int w = Math.Min(c.Width - 4, 62), h = Math.Min(c.Height - 2, lines.Count + 4);
-        int x = (c.Width - w) / 2, y = Math.Max(1, (c.Height - h) / 2);
-        var bg = Rgb.Lerp(_palette.Backdrop, Rgb.Hex(0x0A0A0C), 0.55);
-        for (int row = y; row < y + h; row++)
-            for (int col = x; col < x + w; col++) c.Set(col, row, ' ', null, bg);
-        c.Box(x, y, w, h, "Comandos", _fx ? Rgb.Lerp(Accent, Fx.White, 0.2) : Accent, Accent);
+        var (x, y, bg) = Overlay(c, w, h, "Comandos");
 
         int rows = h - 4, top = y + 1;
         int selLine = lines.FindIndex(l => l.Item == _menuRow);
@@ -2012,7 +1962,7 @@ public sealed class App
         // Everything lives in the command menu; the footer only says how to open it.
         x += c.Text(x, y, "shift", Accent, bold: true) + 1;
         x += c.Text(x, y, "comandos", Muted) + 3;
-        string? context = _menuOpen ? null : _eqOpen ? "esc cierra el ecualizador" : _sourcesOpen ? "esc cierra fuentes" : null;
+        string? context = _menuOpen ? null : SidebarHint() ?? (_eqOpen ? "esc cierra el ecualizador" : _sourcesOpen ? "esc cierra fuentes" : null);
         if (context is not null) c.Text(x, y, context, _fx ? Rgb.Lerp(Muted, _third, 0.4) : Muted);
         int quitX = c.Width - "q salir".Length - 1;
         c.Text(quitX, y, "q", Accent);

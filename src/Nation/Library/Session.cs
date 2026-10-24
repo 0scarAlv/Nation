@@ -3,11 +3,12 @@ using System.Text.Json;
 namespace Nation.Library;
 
 /// <summary>
-/// Last track, position and volume, so the next start picks up where playback left
-/// off. Saved to %LOCALAPPDATA%\Nation\session.json every few seconds and on exit
+/// Last track, position and volume, plus the playlist it came from and the songs
+/// waiting in "a continuación", so the next start picks up where playback left off.
+/// Saved to %LOCALAPPDATA%\Nation\session.json every few seconds and on exit
 /// (closing the terminal window skips the exit path, hence the periodic saves).
 /// </summary>
-public sealed record Session(string Path, double Position, double Volume)
+public sealed record Session(string Path, double Position, double Volume, string? Playlist = null, string[]? UpNext = null)
 {
     private static readonly string FilePath = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nation", "session.json");

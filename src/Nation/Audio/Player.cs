@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Nation.Library;
 
 namespace Nation.Audio;
@@ -9,16 +10,27 @@ namespace Nation.Audio;
 public sealed unsafe class Player : IPlayback, IDisposable
 {
     private readonly IntPtr _mpv;
-    private readonly List<Track> _queue = new();
-    private readonly List<Track> _original = new();
+    // Mirror of mpv's playlist, one entry per playlist item (same order, same indices).
+    private readonly List<Entry> _entries = new();
+    private readonly QueueView _view;
+    // Everything scanned, and what the queue is built from (the library or one playlist) in its own order.
+    private readonly List<Track> _library = new();
+    private List<Track> _context = new();
     private bool _disposed;
 
     public bool Shuffled { get; private set; }
 
-    public IReadOnlyList<Track> Queue => _queue;
+    /// <summary>The play order exactly as mpv will play it, user-queued entries included.</summary>
+    public IReadOnlyList<Track> Queue => _view;
+    public IReadOnlyList<Track> Library => _library;
+    /// <summary>Playlist the queue was built from, or null for the whole library.</summary>
+    public string? ContextName { get; private set; }
+    /// <summary>Bumped on every change to the queue's order or content (for UI caches and session saves).</summary>
+    public int Version { get; private set; }
 
     public Player()
     {
+        _view = new QueueView(_entries);
         _mpv = MpvNative.Create();
         if (_mpv == IntPtr.Zero)
             throw new InvalidOperationException("mpv_create failed (is libmpv-2.dll next to the exe?)");
@@ -40,9 +52,11 @@ public sealed unsafe class Player : IPlayback, IDisposable
     public void Enqueue(IEnumerable<Track> tracks)
     {
         var list = tracks.ToList();
-        bool first = _queue.Count == 0;
-        _queue.AddRange(list);
-        _original.AddRange(list);
+        bool first = _entries.Count == 0;
+        _library.AddRange(list);
+        _context.AddRange(list);
+        _entries.AddRange(list.Select(t => new Entry(t)));
+        Version++;
         // "replace" on an empty player starts the first entry (paused, per the pause option).
         LoadList(list, first ? "replace" : "append");
     }
@@ -72,6 +86,7 @@ public sealed unsafe class Player : IPlayback, IDisposable
     public void Refresh()
     {
         _index = (int)GetInt64("playlist-pos", -1);
+        if (_index != _prunedAt) Prune();
         _paused = GetFlag("pause");
         _muted = GetFlag("mute");
         _idle = GetFlag("idle-active");
@@ -81,7 +96,7 @@ public sealed unsafe class Player : IPlayback, IDisposable
     }
 
     public int CurrentIndex => _index;
-    public Track? Current => _index >= 0 && _index < _queue.Count ? _queue[_index] : null;
+    public Track? Current => _index >= 0 && _index < _entries.Count ? _entries[_index].Track : null;
 
     public bool Paused => _paused;
     public bool Muted => _muted;
@@ -150,59 +165,284 @@ public sealed unsafe class Player : IPlayback, IDisposable
     /// <summary>Switches to a queue entry without changing pause state (used to restore the last session).</summary>
     public void JumpTo(int index)
     {
-        if (index < 0 || index >= _queue.Count) return;
+        if (index < 0 || index >= _entries.Count) return;
         Cmd("playlist-play-index", index.ToString());
+        SyncIndex();
     }
 
-    public void PlayIndex(int index)
+    // ── queue editing ──────────────────────────────────────────────────
+    // Every edit goes through mpv's own playlist commands (insert, move, remove) so
+    // the playing song never stops and the next one stays pre-buffered for gapless.
+
+    private sealed class Entry(Track track, bool queued = false)
     {
-        if (index < 0 || index >= _queue.Count) return;
-        Cmd("playlist-play-index", index.ToString());
-        MpvNative.SetPropertyString(_mpv, "pause", "no");
+        public Track Track { get; } = track;
+        /// <summary>Added by the user with "a continuación" (x), as opposed to coming from the list being played.</summary>
+        public bool Queued { get; set; } = queued;
+    }
+
+    /// <summary>Read-only Track view over the entries, so callers index the queue like a list of tracks.</summary>
+    private sealed class QueueView(List<Entry> entries) : IReadOnlyList<Track>
+    {
+        public Track this[int index] => entries[index].Track;
+        public int Count => entries.Count;
+        public IEnumerator<Track> GetEnumerator() => entries.Select(e => e.Track).GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    public bool IsQueued(int index) => index >= 0 && index < _entries.Count && _entries[index].Queued;
+
+    /// <summary>User-queued entries waiting right after the current one; new ones go after them.</summary>
+    public int UpNextCount
+    {
+        get
+        {
+            int n = 0;
+            for (int i = _index + 1; i < _entries.Count && _entries[i].Queued; i++) n++;
+            return n;
+        }
+    }
+
+    public IEnumerable<Track> UpNext => Enumerable.Range(_index + 1, UpNextCount).Select(i => _entries[i].Track);
+
+    private int _prunedAt = -2;
+
+    /// <summary>
+    /// Queued songs are one-offs: once playback is two entries past one, it leaves the
+    /// queue (the one just before the current stays, so "previous" can still go back to it).
+    /// </summary>
+    private void Prune()
+    {
+        bool removed = false;
+        for (int i = _index - 2; i >= 0; i--)
+            if (_entries[i].Queued)
+            {
+                Cmd("playlist-remove", i.ToString());
+                _entries.RemoveAt(i);
+                removed = true;
+            }
+        if (removed) { SyncIndex(); Version++; }
+        _prunedAt = _index;
+    }
+
+    /// <summary>Live playlist position: the cached one is stale right after a command.</summary>
+    private void SyncIndex() => _index = (int)GetInt64("playlist-pos", -1);
+
+    /// <summary>Moves an entry so it ends up at index `to` (mpv's playlist-move takes the entry to insert before).</summary>
+    private void Move(int from, int to)
+    {
+        if (from == to) return;
+        Cmd("playlist-move", from.ToString(), (from < to ? to + 1 : to).ToString());
+        var e = _entries[from];
+        _entries.RemoveAt(from);
+        _entries.Insert(to, e);
     }
 
     /// <summary>
-    /// Shuffle on: playing track first, rest randomized. Off: back to the original order.
-    /// Rebuilt around mpv's playlist-clear (which keeps the playing entry) so the
-    /// current song never stops or restarts.
+    /// "A continuación": plays these after the current song and after anything queued
+    /// before them (front = right after the current song instead). The rest of the
+    /// queue keeps going afterwards.
+    /// </summary>
+    public void AddToUpNext(IReadOnlyList<Track> tracks, bool front = false)
+    {
+        if (tracks.Count == 0) return;
+        SyncIndex();
+        int at = _index < 0 ? _entries.Count : _index + 1 + (front ? 0 : UpNextCount);
+        int end = _entries.Count;
+        LoadList(tracks, "append");
+        for (int k = 0; k < tracks.Count; k++)
+        {
+            _entries.Add(new Entry(tracks[k], queued: true));
+            Move(end + k, at + k);
+        }
+        SyncIndex();
+        Version++;
+    }
+
+    /// <summary>An upcoming entry joins "a continuación" (moved, not copied); anything else is queued as a copy.</summary>
+    public void QueueEntry(int index, bool front = false)
+    {
+        SyncIndex();
+        if (index < 0 || index >= _entries.Count) return;
+        if (index <= _index || _entries[index].Queued)
+        {
+            AddToUpNext(new[] { _entries[index].Track }, front);
+            return;
+        }
+        int to = _index + 1 + (front ? 0 : UpNextCount);
+        Move(index, to);
+        _entries[to].Queued = true;
+        SyncIndex();
+        Version++;
+    }
+
+    /// <summary>Swaps an upcoming entry with its neighbor; returns its new index (the current song can't be passed).</summary>
+    public int MoveEntry(int index, int delta)
+    {
+        SyncIndex();
+        int to = index + delta;
+        if (index <= _index || to <= _index || to >= _entries.Count || index >= _entries.Count) return index;
+        Move(index, to);
+        SyncIndex();
+        Version++;
+        return to;
+    }
+
+    /// <summary>Drops an entry from the queue (not the one playing). Returns false when it can't.</summary>
+    public bool RemoveEntry(int index)
+    {
+        SyncIndex();
+        if (index < 0 || index >= _entries.Count || index == _index) return false;
+        Cmd("playlist-remove", index.ToString());
+        _entries.RemoveAt(index);
+        SyncIndex();
+        Version++;
+        return true;
+    }
+
+    /// <summary>Plays a queue entry; songs waiting in "a continuación" move along to play right after it.</summary>
+    public void PlayEntry(int index)
+    {
+        SyncIndex();
+        if (index < 0 || index >= _entries.Count) return;
+        var target = _entries[index];
+        var pending = PendingEntries().Where(e => !ReferenceEquals(e, target)).ToList();
+        for (int k = 0; k < pending.Count; k++)
+        {
+            int from = _entries.IndexOf(pending[k]), t = _entries.IndexOf(target);
+            Move(from, (from < t ? t : t + 1) + k);
+        }
+        Cmd("playlist-play-index", _entries.IndexOf(target).ToString());
+        MpvNative.SetPropertyString(_mpv, "pause", "no");
+        SyncIndex();
+        Version++;
+    }
+
+    private List<Entry> PendingEntries() => _entries.Skip(_index + 1).Take(UpNextCount).ToList();
+
+    /// <summary>
+    /// Plays a song from a list (the library, or the playlist called `name`): the queue becomes
+    /// that list, in its order (or shuffled), and "a continuación" survives the switch.
+    /// </summary>
+    public void PlayFrom(IReadOnlyList<Track> list, string? name, int index, bool play = true)
+    {
+        if (index < 0 || index >= list.Count) return;
+        SyncIndex();
+        if (name == ContextName && SameContext(list))
+        {
+            // Same list already queued: jump to that occurrence of the song instead of rebuilding.
+            int occurrence = list.Take(index).Count(t => ReferenceEquals(t, list[index]));
+            int at = -1;
+            for (int i = 0, seen = 0; i < _entries.Count; i++)
+                if (!_entries[i].Queued && ReferenceEquals(_entries[i].Track, list[index]) && seen++ == occurrence) { at = i; break; }
+            if (at >= 0)
+            {
+                if (play) PlayEntry(at); else JumpTo(at);
+                return;
+            }
+        }
+
+        var pending = PendingEntries();
+        var start = list[index];
+        Cmd("loadfile", start.Path, "replace"); // the playlist is now just this song, already current
+        if (play) MpvNative.SetPropertyString(_mpv, "pause", "no");
+        _context = list.ToList();
+        ContextName = name;
+        _entries.Clear();
+        _entries.Add(new Entry(start));
+        if (Shuffled)
+            Rebuild(new List<Entry>(), pending.Concat(Shuffle(_context.Where((_, i) => i != index))).ToList());
+        else
+            Rebuild(_context.Take(index).Select(t => new Entry(t)).ToList(),
+                pending.Concat(_context.Skip(index + 1).Select(t => new Entry(t))).ToList());
+    }
+
+    /// <summary>Keeps the queue tied to its playlist after the playlist is renamed.</summary>
+    public void RenameContext(string from, string to)
+    {
+        if (ContextName == from) ContextName = to;
+    }
+
+    private bool SameContext(IReadOnlyList<Track> list)
+    {
+        if (list.Count != _context.Count) return false;
+        for (int i = 0; i < list.Count; i++)
+            if (!ReferenceEquals(list[i], _context[i])) return false;
+        return true;
+    }
+
+    private static IEnumerable<Entry> Shuffle(IEnumerable<Track> tracks)
+    {
+        var list = tracks.ToList();
+        Random.Shared.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list));
+        return list.Select(t => new Entry(t));
+    }
+
+    /// <summary>
+    /// Lays `before` and `after` around the single entry left in the playlist (the playing
+    /// one, after playlist-clear or loadfile replace) without interrupting it:
+    /// [cur] → [cur, before…] → move cur behind them → [before…, cur] → [before…, cur, after…].
+    /// </summary>
+    private void Rebuild(List<Entry> before, List<Entry> after)
+    {
+        if (before.Count > 0)
+        {
+            LoadList(before.Select(e => e.Track).ToList(), "append");
+            Cmd("playlist-move", "0", (before.Count + 1).ToString());
+            _entries.InsertRange(0, before);
+        }
+        LoadList(after.Select(e => e.Track).ToList(), "append");
+        _entries.AddRange(after);
+        SyncIndex();
+        _prunedAt = _index;
+        Version++;
+    }
+
+    /// <summary>
+    /// Shuffle on: playing song first, then "a continuación", then the rest of the list randomized.
+    /// Off: back to the list's order, resuming where the playing song sits in it.
+    /// The current song never stops or restarts.
     /// </summary>
     public void ToggleShuffle()
     {
-        // Live read: the cached index may be stale if another command ran this frame.
-        int cur = (int)GetInt64("playlist-pos", -1);
-        var playing = cur >= 0 && cur < _queue.Count ? _queue[cur] : null;
+        SyncIndex();
+        var playing = _index >= 0 && _index < _entries.Count ? _entries[_index] : null;
+        var pending = playing is null ? new List<Entry>() : PendingEntries();
         Shuffled = !Shuffled;
-
-        List<Track> order;
-        if (Shuffled)
-        {
-            var rest = _original.Where(t => !ReferenceEquals(t, playing)).ToList();
-            Random.Shared.Shuffle(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rest));
-            order = playing is null ? rest : rest.Prepend(playing).ToList();
-        }
-        else order = _original.ToList();
 
         if (playing is null)
         {
             Cmd("playlist-clear");
-            LoadList(order, "append");
+            _entries.Clear();
+            var order = (Shuffled ? Shuffle(_context) : _context.Select(t => new Entry(t))).ToList();
+            LoadList(order.Select(e => e.Track).ToList(), "append");
+            _entries.AddRange(order);
+            SyncIndex();
+            Version++;
+            return;
+        }
+
+        List<Entry> before, after;
+        if (Shuffled)
+        {
+            int self = playing.Queued ? -1 : _context.FindIndex(t => ReferenceEquals(t, playing.Track));
+            before = new();
+            after = pending.Concat(Shuffle(_context.Where((_, i) => i != self))).ToList();
         }
         else
         {
-            Cmd("playlist-clear"); // playing entry survives at index 0
-            int at = order.IndexOf(playing);
-            if (at > 0)
-            {
-                // [cur] → [cur, before…] → move cur behind them → [before…, cur]; playback isn't interrupted.
-                LoadList(order.GetRange(0, at), "append");
-                Cmd("playlist-move", "0", (at + 1).ToString());
-            }
-            LoadList(order.GetRange(at + 1, order.Count - at - 1), "append");
+            // A queued song isn't part of the list: resume at the first list song that was due after it.
+            var anchor = playing.Queued ? _entries.Skip(_index + 1).FirstOrDefault(e => !e.Queued)?.Track : playing.Track;
+            int at = anchor is null ? -1 : _context.FindIndex(t => ReferenceEquals(t, anchor));
+            if (at < 0) at = _context.Count;
+            int resume = playing.Queued ? at : at + 1;
+            before = _context.Take(at).Select(t => new Entry(t)).ToList();
+            after = pending.Concat(_context.Skip(resume).Select(t => new Entry(t))).ToList();
         }
-
-        _queue.Clear();
-        _queue.AddRange(order);
-        _index = (int)GetInt64("playlist-pos", -1);
+        Cmd("playlist-clear"); // playing entry survives at index 0
+        _entries.Clear();
+        _entries.Add(playing);
+        Rebuild(before, after);
     }
 
     private void Opt(string name, string value) =>
@@ -220,6 +460,27 @@ public sealed unsafe class Player : IPlayback, IDisposable
     {
         long v;
         return MpvNative.GetProperty(_mpv, name, MpvNative.Format.Int64, &v) >= 0 ? v : fallback;
+    }
+
+    private string? GetString(string name)
+    {
+        byte* v;
+        if (MpvNative.GetProperty(_mpv, name, MpvNative.Format.String, &v) < 0) return null;
+        try { return Marshal.PtrToStringUTF8((IntPtr)v); }
+        finally { MpvNative.Free(v); }
+    }
+
+    /// <summary>
+    /// Self-check for --snapshot: entries whose file differs from mpv's own playlist
+    /// at the same index (0 = the mirror is exact), or -1 when the lengths differ.
+    /// </summary>
+    public int MirrorMismatches()
+    {
+        if (GetInt64("playlist-count", -1) != _entries.Count) return -1;
+        int bad = 0;
+        for (int i = 0; i < _entries.Count; i++)
+            if (!string.Equals(GetString($"playlist/{i}/filename"), _entries[i].Track.Path, StringComparison.OrdinalIgnoreCase)) bad++;
+        return bad;
     }
 
     private bool GetFlag(string name)

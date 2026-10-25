@@ -44,9 +44,41 @@ public static class YtDlp
     /// </summary>
     public static void PrepareEnvironment()
     {
+        SeedFromInstall();
         string path = Environment.GetEnvironmentVariable("PATH") ?? "";
         if (!path.Split(';').Contains(OwnDir, StringComparer.OrdinalIgnoreCase))
             Environment.SetEnvironmentVariable("PATH", OwnDir + ";" + path);
+    }
+
+    // The installer ships a copy next to Nation.exe. It goes to Nation's own folder (which
+    // updates itself weekly) when there's none there yet, or when the installer's is newer.
+    private static void SeedFromInstall()
+    {
+        string bundled = Path.Combine(AppContext.BaseDirectory, "yt-dlp");
+        if (!File.Exists(Path.Combine(bundled, "yt-dlp.exe"))) return;
+        try
+        {
+            string bundledVersion = ReadVersion(Path.Combine(bundled, "nation-version.txt"));
+            if (File.Exists(OwnExe) && string.CompareOrdinal(bundledVersion, ReadVersion(VersionFile)) <= 0) return;
+            if (Directory.Exists(OwnDir)) Directory.Delete(OwnDir, recursive: true);
+            CopyDirectory(bundled, OwnDir);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // yt-dlp may be running (another Nation open); next start tries again.
+        }
+    }
+
+    // Release tags are dates (2026.10.10), so ordinal order is release order.
+    private static string ReadVersion(string file) => File.Exists(file) ? File.ReadAllText(file).Trim() : "";
+
+    private static void CopyDirectory(string from, string to)
+    {
+        Directory.CreateDirectory(to);
+        foreach (var dir in Directory.GetDirectories(from, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(to, Path.GetRelativePath(from, dir)));
+        foreach (var file in Directory.GetFiles(from, "*", SearchOption.AllDirectories))
+            File.Copy(file, Path.Combine(to, Path.GetRelativePath(from, file)), overwrite: true);
     }
 
     /// <summary>

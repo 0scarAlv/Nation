@@ -5,6 +5,7 @@ Nation se distribuye bajo la [GPL-3.0](LICENSE). Incluye o usa estos componentes
 | Componente | Licencia | Fuente |
 |---|---|---|
 | **libmpv** (`libmpv-2.dll`, build de shinchiro/mpv-winbuild-cmake, compilado con la opción `gpl`) | GPL-2.0-or-later (el build incluye componentes GPL-3.0) | https://github.com/mpv-player/mpv · https://github.com/shinchiro/mpv-winbuild-cmake |
+| **yt-dlp** (build oficial `yt-dlp_win.zip`, carpeta `yt-dlp`) | Unlicense (el build incluye Python y dependencias con sus propias licencias, en `_internal`) | https://github.com/yt-dlp/yt-dlp |
 | FFmpeg (dentro de libmpv) | GPL (según la configuración del build) | https://ffmpeg.org |
 | TagLibSharp 2.3.0 | LGPL-2.1 | https://github.com/mono/taglib-sharp |
 | NAudio.Wasapi 2.3.0 | MIT | https://github.com/naudio/NAudio |

@@ -8,6 +8,9 @@ if (-not (Test-Path (Join-Path $root 'native\libmpv-2.dll'))) {
     & (Join-Path $PSScriptRoot 'fetch-libmpv.ps1')
 }
 
+# yt-dlp ships with the installer (YouTube Music mode); always the newest release.
+& (Join-Path $PSScriptRoot 'fetch-ytdlp.ps1')
+
 $csproj = Join-Path $root 'src\Nation\Nation.csproj'
 $version = ([xml](Get-Content $csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
 

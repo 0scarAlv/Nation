@@ -22,13 +22,14 @@ public sealed class ListenSync
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
+    private readonly ListenLog _log;
     private readonly string _path;
-    public Profile Owner { get; }
+    public Profile Owner => _log.Profile;
 
-    public ListenSync(string path, Profile owner)
+    public ListenSync(ListenLog log)
     {
-        _path = path;
-        Owner = owner;
+        _log = log;
+        _path = log.Path;
     }
 
     private SqliteConnection Open()
@@ -76,6 +77,44 @@ public sealed class ListenSync
         bool more = rows.Count > limit;
         if (more) rows.RemoveAt(rows.Count - 1);
         return (rows, more);
+    }
+
+    /// <summary>
+    /// A paired phone brings its owner here (their second PC): this journal, its history and
+    /// everything it records from now on become that person's. Refused once any phone is
+    /// linked, so a friend's phone plugged into this PC can't take it over.
+    /// </summary>
+    public string? TakeIdentity(string listener, string name)
+    {
+        if (string.IsNullOrWhiteSpace(listener)) return "falta la identidad";
+        if (listener == Owner.ListenerId) return null;
+        using var db = Open();
+        using (var count = db.CreateCommand())
+        {
+            count.CommandText = "SELECT COUNT(*) FROM device WHERE kind = 'phone'";
+            if (Convert.ToInt64(count.ExecuteScalar()) > 0) return "este Nation ya tiene un teléfono vinculado";
+        }
+        string previous = Owner.ListenerId;
+        using (var tx = db.BeginTransaction())
+        using (var cmd = db.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            // updated_at moves too, so the phone pulls this history under its new owner.
+            cmd.CommandText = """
+                UPDATE listen SET listener = $new, updated_at = $now WHERE listener = $old OR listener = '';
+                UPDATE device SET listener = $new WHERE listener = $old;
+                INSERT INTO meta (key, value) VALUES ('owner', $new) ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                """;
+            cmd.Parameters.AddWithValue("$new", listener);
+            cmd.Parameters.AddWithValue("$old", previous);
+            cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+        }
+        var profile = Owner with { ListenerId = listener, Name = string.IsNullOrWhiteSpace(name) ? Owner.Name : name };
+        profile.Save(_log.ProfilePath);
+        _log.Profile = profile;
+        return null;
     }
 
     /// <summary>

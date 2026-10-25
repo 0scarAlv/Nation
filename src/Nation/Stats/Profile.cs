@@ -54,5 +54,17 @@ public sealed record Profile(string ListenerId, string Name, string DeviceId, st
         return fixedUp;
     }
 
+    /// <summary>Writes the profile (best effort: the journal's meta table remembers the owner anyway).</summary>
+    public void Save(string? path = null)
+    {
+        path ??= DefaultPath;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
     private static string NewId() => Guid.NewGuid().ToString("N");
 }

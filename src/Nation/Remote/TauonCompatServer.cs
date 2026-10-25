@@ -211,7 +211,8 @@ public sealed class TauonCompatServer : IDisposable
 
     /// <summary>
     /// Listening-journal sync for Shade's phone player (relayed by the Shade agent):
-    /// GET /nation/profile, GET /nation/listens?since=&amp;sinceId=&amp;limit=, POST /nation/listens.
+    /// GET /nation/profile, GET /nation/listens?since=&amp;sinceId=&amp;limit=, POST /nation/listens,
+    /// POST /nation/identity (a paired phone brings its owner to this PC).
     /// </summary>
     private (string, string, byte[]) RouteNation(string method, string path, byte[] body)
     {
@@ -232,6 +233,14 @@ public sealed class TauonCompatServer : IDisposable
                     var (listens, more) = sync.Changed(since, query.GetValueOrDefault("sinceId") ?? "", limit);
                     return NationJson(new { listener = sync.Owner.ListenerId, listens, more });
                 }
+                case ("POST", "/nation/identity"):
+                {
+                    var take = JsonSerializer.Deserialize<IdentityRequest>(body, ListenSync.Json);
+                    var error = sync.TakeIdentity(take?.Listener ?? "", take?.Name ?? "");
+                    return error is null
+                        ? NationJson(new { listener = sync.Owner.ListenerId, name = sync.Owner.Name, device = sync.Owner.DeviceId })
+                        : ("409 Conflict", "application/json", JsonSerializer.SerializeToUtf8Bytes(new { error }, ListenSync.Json));
+                }
                 case ("POST", "/nation/listens"):
                 {
                     var push = JsonSerializer.Deserialize<ListenPush>(body, ListenSync.Json);
@@ -247,6 +256,8 @@ public sealed class TauonCompatServer : IDisposable
         }
         return NotFound();
     }
+
+    private sealed record IdentityRequest(string? Listener, string? Name);
 
     private sealed record ListenPush(DeviceDto? Device, List<ListenDto>? Listens);
 

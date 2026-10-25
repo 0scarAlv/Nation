@@ -35,6 +35,8 @@ Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; Gr
 
 [Files]
 Source: "..\dist\app\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+; yt-dlp for YouTube Music; Nation copies it to its own auto-updating folder on first run.
+Source: "..\native\yt-dlp\*"; DestDir: "{app}\yt-dlp"; Flags: recursesubdirs ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 

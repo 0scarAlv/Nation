@@ -8,7 +8,7 @@ namespace Nation.Stats;
 /// in any order and any number of times without double counting.
 /// </summary>
 public sealed record Listen(
-    string Id, string Device, string Source,
+    string Id, string Listener, string Device, string Source,
     long StartedAt, long EndedAt, long PlayedMs, long DurationMs,
     string Title, string Artist, string Album, string? Genre, string? Isrc, string? Path,
     string TrackKey, bool Music);
@@ -23,10 +23,13 @@ public sealed class ListenLog : IDisposable
     public static readonly string DefaultPath = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nation", "listens.db");
 
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
     private readonly SqliteConnection _db;
 
-    public ListenLog(string? path = null)
+    /// <summary>The person this journal belongs to, and this PC. Only their listens are merged in.</summary>
+    public Profile Profile { get; }
+
+    public ListenLog(string? path = null, string? profilePath = null)
     {
         path ??= DefaultPath;
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
@@ -35,6 +38,8 @@ public sealed class ListenLog : IDisposable
         _db.Open();
         Exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
         Migrate();
+        Profile = Profile.LoadOrCreate(GetMeta("owner"), ThisMachineDevice(), profilePath);
+        Adopt(Profile);
     }
 
     public SqliteConnection Connection => _db;
@@ -44,7 +49,7 @@ public sealed class ListenLog : IDisposable
         long version = Scalar("PRAGMA user_version");
         if (version >= SchemaVersion) return;
         // Times are Unix milliseconds (UTC). updated_at lets a device ask "what changed since my last sync".
-        Exec("""
+        if (version < 1) Exec("""
             CREATE TABLE IF NOT EXISTS listen (
                 id          TEXT PRIMARY KEY,
                 device      TEXT NOT NULL,
@@ -68,6 +73,68 @@ public sealed class ListenLog : IDisposable
             CREATE INDEX IF NOT EXISTS listen_updated ON listen(updated_at);
             PRAGMA user_version = 1;
             """);
+        // v2: whose listen it is (one id per person across devices), the devices seen, and the journal's owner.
+        // Rows from v1 get an empty listener here and are claimed by Adopt().
+        if (version < 2) Exec("""
+            BEGIN;
+            ALTER TABLE listen ADD COLUMN listener TEXT NOT NULL DEFAULT '';
+            CREATE INDEX IF NOT EXISTS listen_listener ON listen(listener);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS device (
+                id        TEXT PRIMARY KEY,
+                listener  TEXT NOT NULL,
+                name      TEXT NOT NULL,
+                kind      TEXT NOT NULL,
+                added_at  INTEGER NOT NULL
+            );
+            PRAGMA user_version = 2;
+            COMMIT;
+            """);
+    }
+
+    /// <summary>
+    /// Records the owner and this PC, and hands them the listens written before ids existed
+    /// (v1 stored the device as "pc:" + machine name). The journal belongs to whoever
+    /// profile.json names: importing a profile from another PC moves this history to that person.
+    /// </summary>
+    private void Adopt(Profile p)
+    {
+        string? previous = GetMeta("owner");
+        using var tx = _db.BeginTransaction();
+        using var cmd = _db.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            UPDATE listen SET device = $device WHERE listener = '' AND device LIKE 'pc:%';
+            UPDATE listen SET listener = $listener WHERE listener = '' OR listener = $previous;
+            UPDATE device SET listener = $listener WHERE listener = $previous;
+            INSERT INTO meta (key, value) VALUES ('owner', $listener) ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            INSERT INTO device (id, listener, name, kind, added_at) VALUES ($device, $listener, $name, 'pc', $now)
+                ON CONFLICT(id) DO UPDATE SET name = excluded.name, listener = excluded.listener;
+            """;
+        cmd.Parameters.AddWithValue("$previous", previous ?? "");
+        cmd.Parameters.AddWithValue("$listener", p.ListenerId);
+        cmd.Parameters.AddWithValue("$device", p.DeviceId);
+        cmd.Parameters.AddWithValue("$name", p.DeviceName);
+        cmd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    // The id this PC was given before, in case profile.json was lost.
+    private string? ThisMachineDevice()
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "SELECT id FROM device WHERE kind = 'pc' AND name = $name COLLATE NOCASE ORDER BY added_at LIMIT 1";
+        cmd.Parameters.AddWithValue("$name", Environment.MachineName);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private string? GetMeta(string key)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "SELECT value FROM meta WHERE key = $key";
+        cmd.Parameters.AddWithValue("$key", key);
+        return cmd.ExecuteScalar() as string;
     }
 
     /// <summary>Inserts or refreshes a listen (an open one is saved every few seconds while it grows).</summary>
@@ -75,14 +142,15 @@ public sealed class ListenLog : IDisposable
     {
         using var cmd = _db.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO listen (id, device, source, started_at, ended_at, played_ms, duration_ms,
+            INSERT INTO listen (id, listener, device, source, started_at, ended_at, played_ms, duration_ms,
                                 title, artist, album, genre, isrc, path, track_key, music, updated_at)
-            VALUES ($id, $device, $source, $started, $ended, $played, $duration,
+            VALUES ($id, $listener, $device, $source, $started, $ended, $played, $duration,
                     $title, $artist, $album, $genre, $isrc, $path, $key, $music, $updated)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at = excluded.ended_at, played_ms = excluded.played_ms, updated_at = excluded.updated_at
             """;
         cmd.Parameters.AddWithValue("$id", l.Id);
+        cmd.Parameters.AddWithValue("$listener", l.Listener);
         cmd.Parameters.AddWithValue("$device", l.Device);
         cmd.Parameters.AddWithValue("$source", l.Source);
         cmd.Parameters.AddWithValue("$started", l.StartedAt);

@@ -148,6 +148,8 @@ return 0;
 // A broken stats database must not keep the player from starting.
 static Nation.Stats.ListenLog? TryOpenListens(string? path)
 {
-    try { return new Nation.Stats.ListenLog(path); }
+    // Tests pass their own journal; its profile lives next to it so the real one is never touched.
+    string? profile = path is null ? null : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, "profile.json");
+    try { return new Nation.Stats.ListenLog(path, profile); }
     catch (Exception e) { Console.Error.WriteLine("Estadísticas desactivadas: " + e.Message); return null; }
 }

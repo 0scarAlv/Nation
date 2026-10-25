@@ -18,8 +18,6 @@ public sealed class ListenTracker
     private static readonly TimeSpan SaveEvery = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(30);
 
-    public static readonly string Device = "pc:" + Environment.MachineName.ToLowerInvariant();
-
     private readonly ListenLog _log;
     private Open? _open;
     private DateTime _lastTick;
@@ -110,7 +108,7 @@ public sealed class ListenTracker
         try
         {
             _log.Upsert(new Listen(
-                o.Id, Device, o.Source,
+                o.Id, _log.Profile.ListenerId, _log.Profile.DeviceId, o.Source,
                 ToUnixMs(o.StartedAt), ToUnixMs(o.LastPlaying), (long)o.PlayedMs, (long)t.Duration.TotalMilliseconds,
                 t.Title, t.Artist, t.Album, t.Genre, t.Isrc, t.IsExternal || t.IsStream ? null : t.Path,
                 TrackKeyOf(t), o.Music));

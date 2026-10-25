@@ -68,6 +68,8 @@ using var externalPlayer = external && (snapshotPath is null || externalSnapshot
 
 // Listening journal for stats; snapshots only open one passed explicitly (their few muted seconds stay under the 5 s minimum).
 using var listens = snapshotPath is null || listensDb is not null ? TryOpenListens(listensDb) : null;
+// Shade's phone player syncs its journal with this one through the API.
+if (remote is not null && listens is not null) remote.Sync = new Nation.Stats.ListenSync(listens.Path, listens.Profile);
 
 using var youtube = new YouTubeMusic();
 if (snapshotPath is null) YtDlp.UpdateInBackground();

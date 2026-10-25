@@ -29,9 +29,13 @@ public sealed class ListenLog : IDisposable
     /// <summary>The person this journal belongs to, and this PC. Only their listens are merged in.</summary>
     public Profile Profile { get; }
 
+    /// <summary>The database file, for readers that need their own connection.</summary>
+    public string Path { get; }
+
     public ListenLog(string? path = null, string? profilePath = null)
     {
         path ??= DefaultPath;
+        Path = path;
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
         SQLitePCL.Batteries_V2.Init();
         _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());

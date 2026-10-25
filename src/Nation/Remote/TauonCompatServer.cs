@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Nation.Art;
 using Nation.Library;
+using Nation.Stats;
 
 namespace Nation.Remote;
 
@@ -46,6 +47,9 @@ public sealed class TauonCompatServer : IDisposable
     public bool Running { get; private set; }
     public string? Error { get; private set; }
     public DateTime LastRequestUtc { get; private set; }
+
+    /// <summary>The journal's sync endpoints (/nation/*); null while stats are off.</summary>
+    public ListenSync? Sync { get; set; }
 
     /// <summary>Called on the UI thread to run a command: play, pause, next, back, seek, shuffle, repeat.</summary>
     public Action<string, long>? OnCommand { get; set; }
@@ -90,10 +94,10 @@ public sealed class TauonCompatServer : IDisposable
             {
                 client.ReceiveTimeout = 2000;
                 var stream = client.GetStream();
-                var path = await ReadRequestPathAsync(stream);
-                if (path is null) return;
+                var request = await ReadRequestAsync(stream);
+                if (request is not { } req) return;
                 LastRequestUtc = DateTime.UtcNow;
-                var (status, mime, body) = Route(path);
+                var (status, mime, body) = req.Path.StartsWith("/nation/") ? RouteNation(req.Method, req.Path, req.Body) : Route(req.Path);
                 var header = $"HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {body.Length}\r\n" +
                              "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
                 await stream.WriteAsync(Encoding.ASCII.GetBytes(header));
@@ -106,21 +110,161 @@ public sealed class TauonCompatServer : IDisposable
         }
     }
 
-    /// <summary>Reads up to the end of the headers and returns the request path (GET only).</summary>
-    private static async Task<string?> ReadRequestPathAsync(NetworkStream stream)
+    /// <summary>Reads the request line, headers and (for POST) a Content-Length body.</summary>
+    private static async Task<(string Method, string Path, byte[] Body)?> ReadRequestAsync(NetworkStream stream)
     {
-        var buffer = new byte[4096];
-        int read = 0;
-        while (read < buffer.Length)
+        var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int headerEnd = -1;
+        while (headerEnd < 0 && buffer.Length < 64 * 1024)
         {
-            int n = await stream.ReadAsync(buffer.AsMemory(read));
+            int n = await stream.ReadAsync(chunk);
             if (n == 0) break;
-            read += n;
-            if (Encoding.ASCII.GetString(buffer, 0, read).Contains("\r\n\r\n")) break;
+            buffer.Write(chunk, 0, n);
+            headerEnd = IndexOfHeaderEnd(buffer.GetBuffer(), (int)buffer.Length);
         }
-        var requestLine = Encoding.ASCII.GetString(buffer, 0, read).Split("\r\n")[0].Split(' ');
-        return requestLine.Length >= 2 ? requestLine[1] : null;
+        if (headerEnd < 0) return null;
+
+        var all = buffer.ToArray();
+        var head = Encoding.ASCII.GetString(all, 0, headerEnd).Split("\r\n");
+        var requestLine = head[0].Split(' ');
+        if (requestLine.Length < 2) return null;
+        int length = 0;
+        bool chunked = false;
+        foreach (var line in head.Skip(1))
+        {
+            int colon = line.IndexOf(':');
+            if (colon <= 0) continue;
+            var name = line[..colon].Trim();
+            var value = line[(colon + 1)..].Trim();
+            if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) int.TryParse(value, out length);
+            if (name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase) && value.Contains("chunked", StringComparison.OrdinalIgnoreCase)) chunked = true;
+        }
+
+        // Whatever already arrived past the headers, then the rest from the socket.
+        var rest = new MemoryStream();
+        rest.Write(all, headerEnd + 4, all.Length - (headerEnd + 4));
+        if (chunked)
+        {
+            var body = await ReadChunkedAsync(stream, rest);
+            return body is null ? null : (requestLine[0], requestLine[1], body);
+        }
+        if (length is < 0 or > MaxBodyBytes) return null;
+        while (rest.Length < length)
+        {
+            int n = await stream.ReadAsync(chunk);
+            if (n == 0) return null;
+            rest.Write(chunk, 0, n);
+        }
+        return (requestLine[0], requestLine[1], rest.ToArray().AsSpan(0, length).ToArray());
     }
+
+    // Transfer-Encoding: chunked (what HttpClient sends for JSON content of unknown length):
+    // hex size line, data, CRLF … until a zero-size chunk.
+    private static async Task<byte[]?> ReadChunkedAsync(NetworkStream stream, MemoryStream received)
+    {
+        var raw = received;
+        var chunk = new byte[8192];
+        var body = new MemoryStream();
+        int pos = 0;
+        while (true)
+        {
+            int lineEnd;
+            while ((lineEnd = IndexOfCrLf(raw.GetBuffer(), pos, (int)raw.Length)) < 0)
+                if (!await ReadMore()) return null;
+            var sizeText = Encoding.ASCII.GetString(raw.GetBuffer(), pos, lineEnd - pos).Split(';')[0].Trim();
+            if (!int.TryParse(sizeText, System.Globalization.NumberStyles.HexNumber, null, out int size) || size < 0) return null;
+            pos = lineEnd + 2;
+            if (size == 0) return body.ToArray();
+            if (body.Length + size > MaxBodyBytes) return null;
+            while (raw.Length < pos + size + 2)
+                if (!await ReadMore()) return null;
+            body.Write(raw.GetBuffer(), pos, size);
+            pos += size + 2;
+        }
+
+        async Task<bool> ReadMore()
+        {
+            int n = await stream.ReadAsync(chunk);
+            if (n == 0) return false;
+            raw.Position = raw.Length;
+            raw.Write(chunk, 0, n);
+            return true;
+        }
+    }
+
+    private static int IndexOfCrLf(byte[] data, int from, int count)
+    {
+        for (int i = from + 1; i < count; i++)
+            if (data[i - 1] == '\r' && data[i] == '\n') return i - 1;
+        return -1;
+    }
+
+    private const int MaxBodyBytes = 32 * 1024 * 1024;
+
+    private static int IndexOfHeaderEnd(byte[] data, int count)
+    {
+        for (int i = 3; i < count; i++)
+            if (data[i - 3] == '\r' && data[i - 2] == '\n' && data[i - 1] == '\r' && data[i] == '\n') return i - 3;
+        return -1;
+    }
+
+    /// <summary>
+    /// Listening-journal sync for Shade's phone player (relayed by the Shade agent):
+    /// GET /nation/profile, GET /nation/listens?since=&amp;sinceId=&amp;limit=, POST /nation/listens.
+    /// </summary>
+    private (string, string, byte[]) RouteNation(string method, string path, byte[] body)
+    {
+        var sync = Sync;
+        if (sync is null) return ("503 Service Unavailable", "text/plain", Encoding.ASCII.GetBytes("stats off"));
+        var route = path.Split('?')[0].TrimEnd('/');
+        try
+        {
+            switch (method, route)
+            {
+                case ("GET", "/nation/profile"):
+                    return NationJson(new { listener = sync.Owner.ListenerId, name = sync.Owner.Name, device = sync.Owner.DeviceId });
+                case ("GET", "/nation/listens"):
+                {
+                    var query = ParseQuery(path);
+                    long since = long.TryParse(query.GetValueOrDefault("since"), out var s) ? s : 0;
+                    int limit = int.TryParse(query.GetValueOrDefault("limit"), out var l) ? Math.Clamp(l, 1, 5000) : 1000;
+                    var (listens, more) = sync.Changed(since, query.GetValueOrDefault("sinceId") ?? "", limit);
+                    return NationJson(new { listener = sync.Owner.ListenerId, listens, more });
+                }
+                case ("POST", "/nation/listens"):
+                {
+                    var push = JsonSerializer.Deserialize<ListenPush>(body, ListenSync.Json);
+                    if (push?.Device is null) return ("400 Bad Request", "text/plain", Encoding.ASCII.GetBytes("device required"));
+                    int accepted = sync.Merge(push.Device, push.Listens ?? []);
+                    return NationJson(new { accepted });
+                }
+            }
+        }
+        catch (Exception e) when (e is JsonException or Microsoft.Data.Sqlite.SqliteException)
+        {
+            return ("500 Internal Server Error", "text/plain", Encoding.UTF8.GetBytes(e.Message));
+        }
+        return NotFound();
+    }
+
+    private sealed record ListenPush(DeviceDto? Device, List<ListenDto>? Listens);
+
+    private static Dictionary<string, string> ParseQuery(string path)
+    {
+        var result = new Dictionary<string, string>();
+        int q = path.IndexOf('?');
+        if (q < 0) return result;
+        foreach (var pair in path[(q + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq > 0) result[Uri.UnescapeDataString(pair[..eq])] = Uri.UnescapeDataString(pair[(eq + 1)..]);
+        }
+        return result;
+    }
+
+    private static (string, string, byte[]) NationJson(object value) =>
+        ("200 OK", "application/json", JsonSerializer.SerializeToUtf8Bytes(value, ListenSync.Json));
 
     private (string Status, string Mime, byte[] Body) Route(string path)
     {

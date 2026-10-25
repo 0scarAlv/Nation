@@ -10,7 +10,8 @@ namespace Nation.Library;
 /// </summary>
 public static class LibraryCache
 {
-    private const int FormatVersion = 1;
+    // 2: genre + ISRC (for listening stats); older caches rescan once.
+    private const int FormatVersion = 2;
 
     private static readonly string FilePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nation", "library.json");
@@ -18,14 +19,14 @@ public static class LibraryCache
     public sealed record Entry(
         string Path, long Size, long MTime,
         string Title, string Artist, string Album, uint Year, long DurationMs,
-        string Codec, int SampleRate, int BitsPerSample, int Bitrate)
+        string Codec, int SampleRate, int BitsPerSample, int Bitrate, string? Genre, string? Isrc)
     {
         public Track ToTrack() => new(Path, Title, Artist, Album, Year, TimeSpan.FromMilliseconds(DurationMs),
-            Codec, SampleRate, BitsPerSample, Bitrate);
+            Codec, SampleRate, BitsPerSample, Bitrate) { Genre = Genre, Isrc = Isrc };
 
         public static Entry From(Track t, long size, long mtime) => new(t.Path, size, mtime,
             t.Title, t.Artist, t.Album, t.Year, (long)t.Duration.TotalMilliseconds,
-            t.Codec, t.SampleRate, t.BitsPerSample, t.Bitrate);
+            t.Codec, t.SampleRate, t.BitsPerSample, t.Bitrate, t.Genre, t.Isrc);
     }
 
     private sealed record CacheFile(int Version, List<Entry> Entries);

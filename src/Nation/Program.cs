@@ -6,10 +6,10 @@ using Nation.Remote;
 using Nation.Streaming;
 using Nation.Tui;
 
-// Usage: nation [files|folders...] [--shuffle] [--volume <0-100>] [--offline] [--no-api] [--api-port <n>] [--no-media-keys] [--skin] [--no-external] [--sessions] [--snapshot <file> [--external] [--snapshot-keys <keys>]]
+// Usage: nation [files|folders...] [--shuffle] [--volume <0-100>] [--offline] [--no-api] [--api-port <n>] [--no-media-keys] [--skin] [--no-external] [--listens-db <file>] [--sessions] [--snapshot <file> [--external] [--snapshot-keys <keys>]]
 // With no paths, plays the user's Music folder.
 var paths = new List<string>();
-string? snapshotPath = null, snapshotKeys = null;
+string? snapshotPath = null, snapshotKeys = null, listensDb = null;
 bool shuffle = false, offline = false, api = true, smtc = true, external = true, externalSnapshot = false, skin = false, demoSpectrum = false;
 int apiPort = TauonCompatServer.DefaultPort;
 int? volume = null;
@@ -17,6 +17,7 @@ for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--snapshot" && i + 1 < args.Length) snapshotPath = args[++i];
     else if (args[i] == "--snapshot-keys" && i + 1 < args.Length) snapshotKeys = args[++i];
+    else if (args[i] == "--listens-db" && i + 1 < args.Length) listensDb = args[++i];
     else if (args[i] == "--shuffle") shuffle = true;
     else if (args[i] == "--offline") offline = true;
     else if (args[i] == "--no-api") api = false;
@@ -65,9 +66,12 @@ using var media = smtc && snapshotPath is null ? MediaSession.TryCreate() : null
 var sources = SourceSettings.Load();
 using var externalPlayer = external && (snapshotPath is null || externalSnapshot) ? ExternalPlayer.TryStart(sources.PinnedAppId) : null;
 
+// Listening journal for stats; snapshots only open one passed explicitly (their few muted seconds stay under the 5 s minimum).
+using var listens = snapshotPath is null || listensDb is not null ? TryOpenListens(listensDb) : null;
+
 using var youtube = new YouTubeMusic();
 if (snapshotPath is null) YtDlp.UpdateInBackground();
-var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Playlists = PlaylistStore.Load(player.Library), YouTube = youtube, Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null };
+var app = new App(player, spectrum, new LyricsProvider(online: !offline)) { Playlists = PlaylistStore.Load(player.Library), YouTube = youtube, Remote = remote, Media = media, External = externalPlayer, StartAsSkin = skin || tracks.Count == 0, Sources = sources, Ui = UiSettings.Load(), DemoSpectrum = demoSpectrum && snapshotPath is not null, PersistSession = snapshotPath is null, Listens = listens };
 // Remote and media-key commands act on whatever the player is showing (Nation or the followed app).
 if (remote is not null) remote.OnCommand = app.RunCommand;
 if (media is not null) media.OnCommand = app.RunCommand;
@@ -137,5 +141,13 @@ using (var terminal = new Terminal())
         WaitHandle.WaitAny(wakeupArray, app.NextFrameDelay);
     }
     app.SaveSession();
+    app.CloseListens();
 }
 return 0;
+
+// A broken stats database must not keep the player from starting.
+static Nation.Stats.ListenLog? TryOpenListens(string? path)
+{
+    try { return new Nation.Stats.ListenLog(path); }
+    catch (Exception e) { Console.Error.WriteLine("Estadísticas desactivadas: " + e.Message); return null; }
+}

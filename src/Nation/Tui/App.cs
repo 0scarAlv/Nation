@@ -26,6 +26,22 @@ public sealed partial class App
     public ExternalPlayer? External { get; init; }
     /// <summary>--skin: follow another app from the start, even if it's paused.</summary>
     public bool StartAsSkin { get; init; }
+    /// <summary>Listening journal for stats; null when not recording (snapshots).</summary>
+    public Stats.ListenLog? Listens
+    {
+        get => _listens;
+        init
+        {
+            _listens = value;
+            if (value is null) return;
+            _localListens = new(value, positionIsReliable: true);
+            _externalListens = new(value, positionIsReliable: false);
+        }
+    }
+    private readonly Stats.ListenLog? _listens;
+    // Nation's own player and the followed app are tracked apart: both can be playing at once.
+    private readonly Stats.ListenTracker? _localListens, _externalListens;
+
     /// <summary>Sources panel settings (auto-follow, pinned app); saved on every change.</summary>
     public SourceSettings Sources { get; set; } = new();
 
@@ -217,6 +233,24 @@ public sealed partial class App
         _resumePosition = session.Position;
     }
 
+    /// <summary>Everything that plays counts: local files, YouTube streams, and whatever app Nation follows.</summary>
+    private void TrackListens()
+    {
+        if (_localListens is null) return;
+        _localListens.Observe(_player, _player.Current?.IsStream == true ? "youtube" : "local");
+        if (External is { HasSession: true } ext)
+            _externalListens!.Observe(ext, ext.AppName ?? "externa", ext.LooksLikeMusic);
+        else
+            _externalListens!.Close();
+    }
+
+    /// <summary>Saves the listens in progress; called by Program on exit.</summary>
+    public void CloseListens()
+    {
+        _localListens?.Close();
+        _externalListens?.Close();
+    }
+
     /// <summary>Writes the current track/position; also called by Program on exit.</summary>
     public void SaveSession()
     {
@@ -246,6 +280,7 @@ public sealed partial class App
         }
         if (key.KeyChar == '?' || key.Key == ConsoleKey.F1) { OpenMenu(); return true; }
         // Offset keys by character so they work on both US and Spanish layouts.
+        if (_statsOpen && HandleStatsKey(key, shift)) return true;
         if (_sourcesOpen && HandleSourcesKey(key)) return true;
         if (_eqOpen && HandleEqKey(key, shift)) return true;
         if (HandleLibraryShortcut(key)) return true;
@@ -267,7 +302,8 @@ public sealed partial class App
             case ConsoleKey.B: ToggleSidebar(); break;
             case ConsoleKey.L: _showLyrics = !_showLyrics; break;
             case ConsoleKey.F: _fx = !_fx; break;
-            case ConsoleKey.E: _eqOpen = true; _sourcesOpen = false; break;
+            case ConsoleKey.E: _eqOpen = true; _sourcesOpen = _statsOpen = false; break;
+            case ConsoleKey.T: OpenStats(); break;
             case ConsoleKey.V: CycleVisual(); break;
             case ConsoleKey.R: Playback.ToggleRepeat(); break;
             case ConsoleKey.RightArrow: Playback.SeekRelative(shift ? 30 : 5); break;
@@ -358,7 +394,7 @@ public sealed partial class App
     private void OpenSources()
     {
         _sourcesOpen = true;
-        _eqOpen = false;
+        _eqOpen = _statsOpen = false;
         External?.RefreshSessions();
         // Start on whatever is being followed now.
         int active = SourceRows().FindIndex(r => r.Active);
@@ -495,6 +531,7 @@ public sealed partial class App
         _player.Refresh();
         External?.Refresh();
         UpdateSource();
+        TrackListens();
 
         int current = _player.CurrentIndex;
         // Track ids are unique across the library and other apps' tracks.
@@ -545,8 +582,8 @@ public sealed partial class App
         // Taller terminals give the visualizer more rows.
         int playerHeight = Math.Clamp(bodyHeight / 2 + 2, 16, 24);
         // The EQ draws its own spectrum, so the player gives up rows for taller sliders.
-        if (_eqOpen) playerHeight = 14;
-        if (!_showLyrics && !_eqOpen && !_sourcesOpen)
+        if (_eqOpen || _statsOpen) playerHeight = 14;
+        if (!_showLyrics && !_eqOpen && !_sourcesOpen && !_statsOpen)
             DrawNowPlaying(c, rx, bodyTop, rw, bodyHeight);
         else if (bodyHeight - playerHeight >= 8)
         {
@@ -1057,7 +1094,8 @@ public sealed partial class App
 
     private void DrawLower(Canvas c, int x, int y, int w, int h, double dt)
     {
-        if (_sourcesOpen) DrawSources(c, x, y, w, h);
+        if (_statsOpen) DrawStats(c, x, y, w, h);
+        else if (_sourcesOpen) DrawSources(c, x, y, w, h);
         else if (_eqOpen) DrawEqualizer(c, x, y, w, h, dt);
         else DrawLyrics(c, x, y, w, h, dt);
     }
@@ -1105,6 +1143,7 @@ public sealed partial class App
             items.Add(new("Fuentes", "a", "auto-seguir otras apps", () => { Sources = Sources with { AutoFollow = !Sources.AutoFollow }; Sources.Save(); }, YesNo(Sources.AutoFollow)));
             items.Add(new("Fuentes", "esc", "cerrar fuentes", () => _sourcesOpen = false));
         }
+        if (_statsOpen) items.AddRange(StatsMenuItems());
 
         items.Add(new("Reproducción", "espacio", "play / pausa", p.TogglePause, p.Playing ? "sonando" : "pausa"));
         items.Add(new("Reproducción", "n", "siguiente", p.Next));
@@ -1120,7 +1159,8 @@ public sealed partial class App
         items.Add(new("Vista", "o", "fuentes: biblioteca, YouTube Music, Spotify…", OpenSources, _externalMode ? External?.AppName : YtMode ? "youtube music" : "biblioteca"));
         if (!_externalMode) items.Add(new("Vista", "b", "lista de canciones (barra lateral)", ToggleSidebar, Ui.ShowQueue ? "visible" : "oculta"));
         items.Add(new("Vista", "l", "letra", () => _showLyrics = !_showLyrics, YesNo(_showLyrics)));
-        if (!_externalMode) items.Add(new("Vista", "e", "ecualizador", () => { _eqOpen = true; _sourcesOpen = false; }));
+        if (!_externalMode) items.Add(new("Vista", "e", "ecualizador", () => { _eqOpen = true; _sourcesOpen = _statsOpen = false; }));
+        items.Add(new("Vista", "t", "estadísticas: tiempo por artista, género, canción y hora", OpenStats));
         items.Add(new("Vista", "v", "visualizador", CycleVisual, VisualName));
         items.Add(new("Vista", "f", "efectos", () => _fx = !_fx, YesNo(_fx)));
 
@@ -1993,7 +2033,7 @@ public sealed partial class App
         // Everything lives in the command menu; the footer only says how to open it.
         x += c.Text(x, y, "shift", Accent, bold: true) + 1;
         x += c.Text(x, y, "comandos", Muted) + 3;
-        string? context = _menuOpen ? null : SidebarHint() ?? (_eqOpen ? "esc cierra el ecualizador" : _sourcesOpen ? "esc cierra fuentes" : null);
+        string? context = _menuOpen ? null : SidebarHint() ?? (_eqOpen ? "esc cierra el ecualizador" : _sourcesOpen ? "esc cierra fuentes" : _statsOpen ? "esc cierra estadísticas" : null);
         if (context is not null) c.Text(x, y, context, _fx ? Rgb.Lerp(Muted, _third, 0.4) : Muted);
         int quitX = c.Width - "q salir".Length - 1;
         c.Text(quitX, y, "q", Accent);

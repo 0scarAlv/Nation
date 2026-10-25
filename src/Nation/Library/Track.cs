@@ -15,6 +15,11 @@ public sealed record Track(
     /// <summary>Stable per-session id (scan order); exposed as the remote API track id.</summary>
     public int Id { get; init; }
 
+    /// <summary>Genre tag as written in the file ("Alternativo, Indie Rock"), else null.</summary>
+    public string? Genre { get; init; }
+    /// <summary>ISRC tag: the same recording keeps it across files and devices, so stats join on it.</summary>
+    public string? Isrc { get; init; }
+
     /// <summary>App name when the track is playing in another app (no file behind it), else null.</summary>
     public string? Source { get; init; }
     public bool IsExternal => Source is not null;

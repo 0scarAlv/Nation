@@ -69,7 +69,11 @@ public static class TrackScanner
                 codec,
                 props.AudioSampleRate,
                 props.BitsPerSample,
-                props.AudioBitrate);
+                props.AudioBitrate)
+            {
+                Genre = string.IsNullOrWhiteSpace(tag.JoinedGenres) ? null : tag.JoinedGenres,
+                Isrc = string.IsNullOrWhiteSpace(tag.ISRC) ? null : tag.ISRC.Trim().ToUpperInvariant(),
+            };
         }
         catch (Exception)
         {
